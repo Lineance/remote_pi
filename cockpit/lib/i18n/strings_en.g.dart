@@ -2055,6 +2055,9 @@ class Translations$cockpit$findBar$en {
 	/// en: 'Bad pattern'
 	String get badPattern => 'Bad pattern';
 
+	/// en: '${current} of ${total}'
+	String counter({required Object current, required Object total}) => '${current} of ${total}';
+
 	/// en: 'No results'
 	String get noResults => 'No results';
 }
@@ -4512,6 +4515,7 @@ extension on Translations {
 			'cockpit.findBar.next' => 'Next (⏎)',
 			'cockpit.findBar.close' => 'Close (Esc)',
 			'cockpit.findBar.badPattern' => 'Bad pattern',
+			'cockpit.findBar.counter' => ({required Object current, required Object total}) => '${current} of ${total}',
 			'cockpit.findBar.noResults' => 'No results',
 			'cockpit.contentSearch.sectionSearch' => 'SEARCH',
 			'cockpit.contentSearch.searchInFiles' => 'Search in files',
@@ -4986,9 +4990,9 @@ extension on Translations {
 			'theme.error.reservedId' => 'This theme uses the id of a built-in theme. Change "id" in the file and import again.',
 			'theme.error.notAnObject' => ({required Object field}) => 'Expected an object at "${field}".',
 			'theme.error.missingField' => ({required Object field}) => 'Missing required field "${field}".',
-			'theme.error.badColor' => ({required Object value, required Object field}) => '"${value}" at "${field}" is not a color. Use #RGB, #RRGGBB or #RRGGBBAA.',
 			_ => null,
 		} ?? switch (path) {
+			'theme.error.badColor' => ({required Object value, required Object field}) => '"${value}" at "${field}" is not a color. Use #RGB, #RRGGBB or #RRGGBBAA.',
 			'theme.error.unknownBase' => ({required Object value}) => 'Unknown base theme "${value}" in "extends".',
 			'theme.error.noVariants' => 'The theme declares no variant. Add "dark", "light" or both under "variants".',
 			_ => null,

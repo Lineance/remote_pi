@@ -657,8 +657,11 @@ class _TerminalPaneState extends State<TerminalPane>
             bindings: {
               const SingleActivator(LogicalKeyboardKey.keyF, meta: true):
                   openFind,
-              const SingleActivator(LogicalKeyboardKey.keyF, control: true):
-                  openFind,
+              // Ctrl-F só fora do macOS: no shell é forward-char do readline
+              // e page-down no vim/less.
+              if (!Platform.isMacOS)
+                const SingleActivator(LogicalKeyboardKey.keyF, control: true):
+                    openFind,
             },
             child: terminal,
           ),

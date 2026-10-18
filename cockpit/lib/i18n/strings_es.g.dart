@@ -982,6 +982,7 @@ class _Translations$cockpit$findBar$es extends Translations$cockpit$findBar$en {
 	@override String get next => 'Siguiente (⏎)';
 	@override String get close => 'Cerrar (Esc)';
 	@override String get badPattern => 'Patrón inválido';
+	@override String counter({required Object current, required Object total}) => '${current} de ${total}';
 	@override String get noResults => 'Sin resultados';
 }
 
@@ -2453,6 +2454,7 @@ extension on TranslationsEs {
 			'cockpit.findBar.next' => 'Siguiente (⏎)',
 			'cockpit.findBar.close' => 'Cerrar (Esc)',
 			'cockpit.findBar.badPattern' => 'Patrón inválido',
+			'cockpit.findBar.counter' => ({required Object current, required Object total}) => '${current} de ${total}',
 			'cockpit.findBar.noResults' => 'Sin resultados',
 			'cockpit.contentSearch.sectionSearch' => 'BÚSQUEDA',
 			'cockpit.contentSearch.searchInFiles' => 'Buscar en los archivos',
@@ -2927,9 +2929,9 @@ extension on TranslationsEs {
 			'theme.error.reservedId' => 'Este tema usa el id de un tema nativo. Cambia el "id" en el archivo e impórtalo de nuevo.',
 			'theme.error.notAnObject' => ({required Object field}) => 'Se esperaba un objeto en "${field}".',
 			'theme.error.missingField' => ({required Object field}) => 'Falta el campo obligatorio "${field}".',
-			'theme.error.badColor' => ({required Object value, required Object field}) => '"${value}" en "${field}" no es un color. Usa #RGB, #RRGGBB o #RRGGBBAA.',
 			_ => null,
 		} ?? switch (path) {
+			'theme.error.badColor' => ({required Object value, required Object field}) => '"${value}" en "${field}" no es un color. Usa #RGB, #RRGGBB o #RRGGBBAA.',
 			'theme.error.unknownBase' => ({required Object value}) => 'Tema base "${value}" desconocido en "extends".',
 			'theme.error.noVariants' => 'El tema no declara ningún variant. Añade "dark", "light" o ambos en "variants".',
 			_ => null,

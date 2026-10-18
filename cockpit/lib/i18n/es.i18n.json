@@ -641,6 +641,7 @@
       "next": "Siguiente (⏎)",
       "close": "Cerrar (Esc)",
       "badPattern": "Patrón inválido",
+      "counter": "${current} de ${total}",
       "noResults": "Sin resultados"
     },
     "contentSearch": {

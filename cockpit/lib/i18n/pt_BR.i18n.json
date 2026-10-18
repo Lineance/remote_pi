@@ -641,6 +641,7 @@
       "next": "Próximo (⏎)",
       "close": "Fechar (Esc)",
       "badPattern": "Padrão inválido",
+      "counter": "${current} de ${total}",
       "noResults": "Nenhum resultado"
     },
     "contentSearch": {

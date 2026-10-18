@@ -50,7 +50,10 @@ class TerminalFindBar extends StatelessWidget {
     } else if (matchCount == 0) {
       counter = isSearching ? '…' : context.t.cockpit.findBar.noResults;
     } else {
-      counter = '$currentIndex of $matchCount';
+      counter = context.t.cockpit.findBar.counter(
+        current: currentIndex,
+        total: matchCount,
+      );
     }
 
     return Container(

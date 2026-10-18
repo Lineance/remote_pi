@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:cockpit/app/core/terminal/ghostty_font_family.dart';
 import 'package:cockpit/app/core/domain/entities/app_settings.dart';
 import 'package:cockpit/app/core/terminal/terminal_controller.dart';
@@ -117,11 +119,13 @@ class _GhosttyPaneState extends State<_GhosttyPane>
     final shortcuts = <ShortcutActivator, Intent>{
       // ⌘F / Ctrl-F opens the find bar (works even read-only — searching a
       // frozen buffer is fine). Resolved by the Actions scope below, where
-      // flterm dispatches the shortcuts it receives.
+      // flterm dispatches the shortcuts it receives. Ctrl-F only off macOS:
+      // in a shell it is readline's forward-char / page-down in vim and less.
       const SingleActivator(LogicalKeyboardKey.keyF, meta: true):
           const _CockpitFindIntent(),
-      const SingleActivator(LogicalKeyboardKey.keyF, control: true):
-          const _CockpitFindIntent(),
+      if (!Platform.isMacOS)
+        const SingleActivator(LogicalKeyboardKey.keyF, control: true):
+            const _CockpitFindIntent(),
     };
     if (!readOnly && onPaste != null) {
       shortcuts[const SingleActivator(LogicalKeyboardKey.keyV, meta: true)] =

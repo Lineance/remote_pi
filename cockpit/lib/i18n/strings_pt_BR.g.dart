@@ -982,6 +982,7 @@ class _Translations$cockpit$findBar$pt_BR extends Translations$cockpit$findBar$e
 	@override String get next => 'Próximo (⏎)';
 	@override String get close => 'Fechar (Esc)';
 	@override String get badPattern => 'Padrão inválido';
+	@override String counter({required Object current, required Object total}) => '${current} de ${total}';
 	@override String get noResults => 'Nenhum resultado';
 }
 
@@ -2453,6 +2454,7 @@ extension on TranslationsPtBr {
 			'cockpit.findBar.next' => 'Próximo (⏎)',
 			'cockpit.findBar.close' => 'Fechar (Esc)',
 			'cockpit.findBar.badPattern' => 'Padrão inválido',
+			'cockpit.findBar.counter' => ({required Object current, required Object total}) => '${current} de ${total}',
 			'cockpit.findBar.noResults' => 'Nenhum resultado',
 			'cockpit.contentSearch.sectionSearch' => 'BUSCA',
 			'cockpit.contentSearch.searchInFiles' => 'Buscar nos arquivos',
@@ -2927,9 +2929,9 @@ extension on TranslationsPtBr {
 			'theme.error.reservedId' => 'Este tema usa o id de um tema nativo. Mude o "id" no arquivo e importe de novo.',
 			'theme.error.notAnObject' => ({required Object field}) => 'Esperava um objeto em "${field}".',
 			'theme.error.missingField' => ({required Object field}) => 'Falta o campo obrigatório "${field}".',
-			'theme.error.badColor' => ({required Object value, required Object field}) => '"${value}" em "${field}" não é uma cor. Use #RGB, #RRGGBB ou #RRGGBBAA.',
 			_ => null,
 		} ?? switch (path) {
+			'theme.error.badColor' => ({required Object value, required Object field}) => '"${value}" em "${field}" não é uma cor. Use #RGB, #RRGGBB ou #RRGGBBAA.',
 			'theme.error.unknownBase' => ({required Object value}) => 'Tema base "${value}" desconhecido em "extends".',
 			'theme.error.noVariants' => 'O tema não declara nenhum variant. Adicione "dark", "light" ou os dois em "variants".',
 			_ => null,
