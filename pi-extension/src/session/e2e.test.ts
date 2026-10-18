@@ -801,6 +801,8 @@ describe("ACK protocol (plan/25 Wave 0)", () => {
 
       expect(handlerMessages).toEqual(expect.arrayContaining([
         expect.objectContaining({ from: sibling.address(), re: ackOutbound.id }),
+      ]));
+      expect(handlerMessages).not.toEqual(expect.arrayContaining([
         expect.objectContaining({ from: "casa:broker", re: requestOutbound.id }),
       ]));
       expect(ackSettled).toBe(false);

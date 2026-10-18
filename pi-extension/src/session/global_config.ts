@@ -67,8 +67,8 @@ export function listSessions(): string[] {
  * Heuristic: a session has an existing broker socket FILE (POSIX only). On
  * Windows the broker is a named pipe with no file to stat, so this returns
  * false — the authoritative liveness check there is a connect-probe
- * (`leader_election.tryConnect` / `client.supervisorOnline`), not this. Only
- * legacy `session/wizard.ts` consumes this.
+ * (`leader_election.tryConnect`), not this. Only legacy `session/wizard.ts`
+ * consumes this.
  */
 export function sessionHasSock(name: string): boolean {
   if (usesNamedPipe()) return false;

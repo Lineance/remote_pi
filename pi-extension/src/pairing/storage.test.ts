@@ -365,8 +365,8 @@ describe("getOrCreateEd25519Keypair — paired devices block identity minting", 
     }));
   }
 
-  test("unreadable keyring + existing pairings → throws instead of minting (daemon case)", async () => {
-    // systemd --user resolves a different secret-service store than the desktop
+  test("unreadable keyring + existing pairings → throws instead of minting", async () => {
+    // A non-interactive process may resolve a different secret-service store
     // session that paired; minting here makes SelfRevoke wipe peers.json.
     seedPairedDevice();
     const backend = new InMemoryBackend();

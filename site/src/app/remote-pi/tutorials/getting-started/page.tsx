@@ -68,7 +68,7 @@ export default function GettingStartedTutorial() {
           <p className="text-sm">
             No Pi yet? The <strong className="text-fg">No Pi yet</strong> tab
             below runs a one-command <InlineCode>curl</InlineCode> installer that
-            sets up Pi, the plugin, and the supervisor for you. Already have Pi?
+            sets up Pi and the plugin for you. Already have Pi?
             Use the <strong className="text-fg">Already have Pi</strong> path.
           </p>
         </DocsSection>
@@ -177,8 +177,7 @@ export default function GettingStartedTutorial() {
         <DocsSection id="next" title="Where to go next">
           <p>
             That&apos;s one agent, one phone. From here you can let multiple
-            agents talk to each other, reach across machines, or keep an agent
-            running when you walk away:
+            agents talk to each other or reach across machines:
           </p>
           <ul className="ml-6 list-disc space-y-2">
             <li>
@@ -187,12 +186,6 @@ export default function GettingStartedTutorial() {
               </Link>{" "}
               — two agents on the same machine discovering and messaging each
               other.
-            </li>
-            <li>
-              <Link href="/remote-pi/tutorials/daemon" className="text-accent underline">
-                Daemon mode
-              </Link>{" "}
-              — promote a folder to a 24/7 background agent.
             </li>
           </ul>
         </DocsSection>

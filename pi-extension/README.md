@@ -36,9 +36,9 @@ Then in any Pi terminal:
 /remote-pi
 ```
 
-The first run shows a short interactive wizard (agent name, default session,
-whether to auto-start the relay). On every following run, `/remote-pi` joins
-the local agent session and starts the relay automatically — no extra typing.
+The first run shows a short wizard for the agent name and relay preference.
+Remote Pi connects only when you explicitly run `/remote-pi`; it does not
+start automatically with Pi or install an operating-system service.
 
 ### Try the agent network in 30 seconds
 
@@ -204,22 +204,11 @@ Behavior depends on whether there's a local config for this directory:
 
 | State | What happens |
 |---|---|
-| First run (no `.pi/remote-pi/config.json`) | Interactive wizard → saves config → joins agent session → starts relay (if you opted in) |
-| Returning user, auto-start enabled | Joins agent session + starts relay automatically, then prints status |
-| Returning user, auto-start disabled | Prints status only; join/relay must be run manually |
+| First run (no `.pi/remote-pi/config.json`) | Interactive wizard → saves config → joins the agent mesh and starts the relay if selected |
+| Later runs | Start the mesh/relay explicitly with `/remote-pi`; use `/remote-pi relay` for relay-only control |
 
-The wizard asks three questions:
-
-1. **Agent name** — the presentation leaf name for this agent. Senders still
-   copy the complete opaque address returned by `list_peers`; they never build
-   an address from this name. Defaults to the directory name.
-2. **Default session** — the name of the agent-network room for this
-   directory. Multiple terminals in the same directory join the same session.
-3. **Auto-start relay (for mobile app access)?** — `Yes` if you want
-   `/remote-pi` to also connect to the relay so the mobile app can reach this
-   Pi. `No` for local-only use (agent network without mobile access).
-
-Re-run the wizard later with `/remote-pi setup`.
+The wizard asks for an agent name, whether to connect the relay when you explicitly
+run `/remote-pi`, then confirmation. Re-run it later with `/remote-pi setup`.
 
 ---
 
@@ -424,58 +413,6 @@ real name to the peer.
 | `/remote-pi relay url <url>` | Same as `set-relay` |
 | `/remote-pi config` | Show the effective relay URL and its source (env / config / default) |
 
-### Daemon fleet (one supervisor, N background Pis — see [Daemon mode](#daemon-mode))
-
-| Command | Description |
-|---|---|
-| `/remote-pi create <cwd> [--name X]` | Register a folder as a daemon |
-| `/remote-pi remove <id>` | Unregister a daemon (local config preserved) |
-| `/remote-pi daemons` | List registered daemons + state |
-| `/remote-pi daemon start` | Start every registered daemon |
-| `/remote-pi daemon stop` | Stop every running daemon (`/remote-pi stop` stops only the local terminal) |
-| `/remote-pi daemon restart` | Stop + start all daemons |
-| `/remote-pi daemon status` | Detailed runtime status (pid, uptime, restart count) |
-| `/remote-pi daemon send <id> "<text>"` | Send a prompt to a specific daemon |
-| `/remote-pi cron add <id> "<expr>" "<prompt>"` | Schedule a recurring prompt (`--tz`, `--wake`, `--no-skip-busy`, `--catchup`) |
-| `/remote-pi cron list` | List scheduled jobs (schedule, enabled, next run, last status) |
-| `/remote-pi cron run <jobId>` | Fire a job now (ignores its schedule) |
-| `/remote-pi cron enable\|disable <jobId>` | Toggle a job on/off |
-| `/remote-pi cron remove <jobId>` | Delete a job |
-| `/remote-pi cron log [<jobId>] [--tail N]` | Read the fire/skip audit log |
-| `/remote-pi install` | Install `pi-supervisord` as a system service |
-| `/remote-pi uninstall` | Remove the system service (registry preserved) |
-
-All commands above work both as Pi slash commands (interactive) and as
-shell-level `remote-pi <subcommand>` when the package is installed
-globally (`npm install -g remote-pi`).
-
-### Scheduled prompts (`cron`)
-
-`remote-pi cron` schedules **recurring prompts** to daemons through the
-supervisor — e.g. a daily "summarise new PRs". Output flows fire-and-forget to
-the mesh/app like any prompt; the cron layer only audits the dispatch.
-
-- **Schedule** is a cron expression (croner syntax; an optional 6th *seconds*
-  field is supported), with an optional IANA timezone via `--tz`:
-
-  ```sh
-  remote-pi cron add a1b2c3d4 "0 9 * * *" "Summarise new PRs" --tz America/Sao_Paulo
-  ```
-
-- **Minimum interval is 60s** — more frequent schedules are rejected (guards
-  token cost + pileup). A fire is **skipped when the daemon is mid-turn**
-  (`--no-skip-busy` to override); `--wake` starts a stopped daemon first;
-  `--catchup` runs once on supervisor start if the previous run was missed.
-- **Prerequisite**: the supervisor must run as a service (`remote-pi install`).
-  Without it there is no scheduler, and `cron` commands say so instead of
-  silently pretending to schedule.
-- **Audit**: every fire **and** every skip appends one line to
-  `~/.pi/remote/cron.jsonl` with a `result` of `delivered`,
-  `woke_and_delivered`, `deliver_failed`, `skipped_busy`, `skipped_down`, or
-  `skipped_disabled` — read it with `remote-pi cron log`.
-
-Step-by-step walkthrough: the [daemon tutorial](https://remote-pi.jacobmoura.work/tutorials/daemon).
-
 ### Footer + title
 
 - `📡 local (N)` — current agent session and peer count (local mesh)
@@ -489,112 +426,11 @@ tabs.
 
 ---
 
-## Daemon mode
-
-When you want a Pi to keep running in the background (responding to
-mobile prompts at 3am, processing cron jobs, monitoring a folder while
-you're not at the keyboard), promote it to a **daemon** managed by a
-single OS-level supervisor.
-
-See [`docs/daemon.md`](./docs/daemon.md) for troubleshooting.
-
-### One-time setup
-
-```bash
-# Install the package globally so `remote-pi` and `pi-supervisord`
-# are on your PATH (`pi install npm:remote-pi` alone makes the Pi
-# extension available but does NOT expose the CLI binaries — see
-# https://docs.npmjs.com/cli/v10/configuring-npm/package-json#bin).
-npm install -g remote-pi
-
-# Install the supervisor as a user-level system service. Linux uses
-# systemd --user; macOS uses launchd LaunchAgent. Both auto-start at
-# login and survive reboots.
-remote-pi install
-```
-
-The `install` command:
-- Writes `~/.config/systemd/user/remote-pi-supervisord.service` (Linux)
-  or `~/Library/LaunchAgents/dev.remotepi.supervisord.plist` (macOS)
-- Activates it via `systemctl --user enable --now` or `launchctl bootstrap`
-- The supervisor starts immediately and re-starts on every login
-
-### Per-folder workflow
-
-For each agent you want to keep alive 24/7:
-
-```bash
-# 1. Configure the agent interactively first (one time).
-cd ~/Movies
-pi                                 # /remote-pi → setup wizard, /remote-pi pair, etc
-
-# 2. Promote to a daemon. The id is derived from the cwd
-#    (sha256(realpath)[:8]), stable across machines.
-remote-pi create ~/Movies --name "Video Editor"
-# → Daemon registered: id=4e39152d name="Video Editor" cwd=/Users/x/Movies
-
-# 3. Start it (supervisor spawns `pi --mode rpc` for this folder).
-remote-pi daemon start
-```
-
-Now you can:
-
-```bash
-remote-pi daemons                  # list + state
-remote-pi daemon status            # uptime, pid, restart count
-remote-pi daemon send 4e39152d "Cut the first 30 seconds of latest clip"
-remote-pi daemon stop              # stop all
-remote-pi daemon restart           # restart all
-```
-
-The agent receives the prompt as if a user typed it; its response flows
-back through the relay/mesh you configured during interactive setup —
-mobile app sees it live, other agents on the same machine can see it
-via the local UDS mesh.
-
-### Removing or uninstalling
-
-```bash
-remote-pi remove <id>              # unregister one daemon (config preserved)
-remote-pi uninstall                # remove the supervisor service (registry kept)
-```
-
-`uninstall` is reversible — re-running `install` later brings every
-registered daemon back. To wipe the registry entirely, `rm
-~/.pi/remote/daemons.json`.
-
-### Where to find logs
-
-| Platform | Command |
-|---|---|
-| Linux | `journalctl --user -u remote-pi-supervisord -f` |
-| macOS | `tail -f ~/.pi/remote/supervisord.log` |
-
-Each spawned daemon's stderr is forwarded into the supervisor's log
-with a `[<cwd>]` prefix, so a single log stream shows every agent.
-
-### Caveats (plan/26 trade-offs)
-
-- **Tool approval is not gated.** Daemons inherit the same Pi config
-  the interactive run uses — Bash, Edit, Write etc. all execute without
-  prompting. Configure Pi's tool permissions to taste before promoting
-  a folder to daemon.
-- **Pairing still happens interactively.** Daemons don't show a QR
-  themselves; the keypair + paired devices come from the prior `pi`
-  session in the same folder.
-- **Single supervisor.** If `pi-supervisord` crashes all daemons go
-  down with it. systemd/launchd restarts it within seconds; daemons
-  come back automatically.
-- **One daemon per cwd.** The `roomIdForCwd` derivation makes daemons
-  by-path; two daemons in the same folder is rejected at `create` time.
-
----
-
 ## Configuration files
 
 | Path | Scope | What's in it |
 |---|---|---|
-| `<cwd>/.pi/remote-pi/config.json` | Per-directory | `agent_name`, `session_name`, `auto_start_relay` |
+| `<cwd>/.pi/remote-pi/config.json` | Per-directory | `agent_name`, `use_relay` |
 | `~/.pi/remote/config.json` | Per-user | `relay` URL |
 | `~/.pi/remote/peers.json` | Per-machine | Paired mobile devices |
 | `~/.pi/remote/sessions/<name>/` | Per-session | Broker socket + `audit.jsonl` |

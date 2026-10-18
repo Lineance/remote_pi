@@ -11,8 +11,8 @@ const AUTH_TIMEOUT_MS = 5_000;
  * arrives for this long the socket is silently dead — NAT/router idle drop,
  * laptop sleep, or the relay/Cloudflare reaping the connection WITHOUT a clean
  * close frame. That half-open case never fires `close`, so reconnect never
- * triggers and a background daemon sits "online" but dead after a few idle
- * hours. We force-close on timeout so `close` drives the caller's reconnect.
+ * triggers and a long-lived Pi process can appear online but be dead after a
+ * few idle hours. We force-close on timeout so `close` drives the caller's reconnect.
  */
 const LIVENESS_TIMEOUT_MS = 70_000;  // ~2.8 missed relay pings → confidently dead
 const LIVENESS_CHECK_MS = 20_000;

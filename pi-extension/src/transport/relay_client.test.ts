@@ -152,8 +152,8 @@ describe("RelayClient", () => {
   });
 
   // ── Liveness watchdog ───────────────────────────────────────────────────────
-  // Regression for "daemon shows online but is dead after a few idle hours":
-  // a silently half-open WS never fires `close`, so reconnect never triggers.
+  // Regression for a long-lived Pi process appearing online after a silently
+  // half-open WS never fires `close`, so reconnect never triggers.
 
   async function connectFake(client: InstanceType<typeof RelayClient>): Promise<void> {
     const p = client.connect();

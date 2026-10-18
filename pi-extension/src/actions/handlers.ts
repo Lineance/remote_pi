@@ -260,7 +260,7 @@ export async function handleModelSet(
     if (!success) throw new Error("no auth configured for this model");
     // `pi.setModel` only sets the LIVE model — it does NOT persist. Without
     // this, a model picked from the app reverts to the saved default on the
-    // next Pi/daemon restart (the TUI persists because AgentSession.setModel
+    // next Pi process restart (the TUI persists because AgentSession.setModel
     // writes the default; this path doesn't). `onPersist` writes the new
     // default so the app's choice survives. Best-effort — the caller's writer
     // must not throw, so a failed settings write never fails the model change.

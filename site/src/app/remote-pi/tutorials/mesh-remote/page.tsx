@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { DocsSection, DocsSubsection, InlineCode } from "@/components/docs-shell";
+import { DocsSection, InlineCode } from "@/components/docs-shell";
 import { CodeBlock } from "@/components/code-block";
 import { Callout } from "@/components/callout";
 import { Pager } from "@/components/pager";
@@ -176,23 +176,12 @@ export default function MeshRemoteTutorial() {
             server reporting back. Same tools, same envelope; the relay just
             carries it between machines.
           </p>
-          <DocsSubsection title="Keep them reachable">
-            <p>
-              Cross-PC coordination is most useful when the remote agents are
-              always up. That&apos;s the next guide:{" "}
-              <Link href="/remote-pi/tutorials/daemon" className="text-accent underline">
-                run them as 24/7 daemons
-              </Link>
-              .
-            </p>
-          </DocsSubsection>
         </DocsSection>
 
             </article>
 
             <Pager
               prev={{ href: "/remote-pi/tutorials/mesh-local", label: "Local mesh" }}
-              next={{ href: "/remote-pi/tutorials/daemon", label: "Daemon mode" }}
             />
           </div>
         </div>

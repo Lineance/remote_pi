@@ -227,10 +227,7 @@ const {
   _hasActivePeerForTest,
   _getActivePeerCountForTest,
   _checkSelfRevokeForTest,
-  _restartSupervisorCommand,
   _setDisposedForTest,
-  _resetAutoInitedForTest,
-  _setAutoInitedForTest,
   _hasMeshNodeForTest,
   _getLockedNameForTest,
   _resetCwdLockForTest,
@@ -335,47 +332,16 @@ describe("extension default export", () => {
     expect(registeredCommands).toContain("remote-pi devices");
     expect(registeredCommands).toContain("remote-pi revoke");
     expect(registeredCommands).toContain("remote-pi set-relay");
-    // Daemon registry (plan/26 W1)
-    expect(registeredCommands).toContain("remote-pi create");
-    expect(registeredCommands).toContain("remote-pi remove");
-    // Fleet ops (plan/26 W2) — use `daemon` prefix to avoid clashing with
-    // /remote-pi stop (local) since both have very different semantics.
-    expect(registeredCommands).toContain("remote-pi daemons");
-    expect(registeredCommands).toContain("remote-pi daemon start");
-    expect(registeredCommands).toContain("remote-pi daemon stop");
-    expect(registeredCommands).toContain("remote-pi daemon restart");
-    expect(registeredCommands).toContain("remote-pi daemon status");
-    expect(registeredCommands).toContain("remote-pi daemon send");
-    // Service install (plan/26 W3) — systemd / launchd
-    expect(registeredCommands).toContain("remote-pi install");
-    expect(registeredCommands).toContain("remote-pi uninstall");
     // Cross-PC peer inventory (plan/25 W D)
     expect(registeredCommands).toContain("remote-pi peers");
   });
 
-  test("restart-supervisor maps to the right OS command sequence per platform", () => {
-    expect(_restartSupervisorCommand("darwin", 501)).toEqual([
-      { cmd: "launchctl", args: ["kickstart", "-k", "gui/501/dev.remotepi.supervisord"] },
-    ]);
-    expect(_restartSupervisorCommand("linux", 1000)).toEqual([
-      { cmd: "systemctl", args: ["--user", "restart", "remote-pi-supervisord.service"] },
-    ]);
-    // Windows (plan/40): End (ignorable) then Run, via Task Scheduler.
-    expect(_restartSupervisorCommand("win32", 0)).toEqual([
-      { cmd: "schtasks", args: ["/End", "/TN", "RemotePiSupervisor"], ignoreFailure: true },
-      { cmd: "schtasks", args: ["/Run", "/TN", "RemotePiSupervisor"] },
-    ]);
-    // Truly unsupported platform → null (caller exits non-zero).
-    expect(_restartSupervisorCommand("aix", 0)).toBeNull();
-  });
 
   test("no deprecated or removed commands leak back into the surface", () => {
     const { pi, registeredCommands } = makeMockPi();
     (extension as ExtensionFactory)(pi);
-    // 8 plan-25 + 2 daemon registry (W1) + 6 fleet ops (W2) + 2 install (W3)
-    // + 1 cross-PC inventory (plan-25 W D) + 1 cron (plan-39) + 1 rename (plan/41)
-    // + 1 relay control (issue #119 — README documents the verb family).
-    expect(registeredCommands).toHaveLength(23);
+    // Core local-session, mesh, relay, mobile, and configuration commands only.
+    expect(registeredCommands).toHaveLength(12);
     // `relay` is back as ONE command with verbs (start/stop/status/url), not the
     // five separate registrations plan/19 trimmed — the README documents it and
     // without it every `/remote-pi relay …` silently reprinted the status panel.
@@ -3824,12 +3790,8 @@ describe("session_shutdown teardown", () => {
   });
 
   // Regression: the Pi SDK re-evaluates this module FRESH on every session
-  // replacement (jiti `moduleCache: false`), and in daemon mode the fresh
-  // instance re-runs `_cmdRoot` on load. Without releasing the OUTGOING
-  // instance's mesh + relay first, the Cockpit's boot-time `switch_session`
-  // leaves two live connections (the "double mesh connection" bug). The SDK
-  // emits + awaits `session_shutdown` on the outgoing runner before the
-  // replacement loads, so the handler MUST exist and tear everything down.
+  // replacement (jiti `moduleCache: false`). Without releasing the outgoing
+  // mesh and relay, the discarded instance would leave live handles behind.
   test("a session_shutdown handler is registered", () => {
     expect(() => captureEventHandler("session_shutdown")).not.toThrow();
   });
@@ -3923,9 +3885,8 @@ describe("session_shutdown teardown", () => {
     expect(_getState()).toBe("idle");
   });
 
-  // Race guard: the daemon defers its connect (`setTimeout(_cmdRoot, 0)`), so a
-  // shutdown can land while that connect is still in flight. The flag must make
-  // the in-flight connect abort instead of resurrecting a mute ghost peer.
+  // Race guard: an explicit connect can be parked while async mesh/relay setup
+  // is in flight. Shutdown must invalidate it so it cannot resurrect a ghost.
   test("session_shutdown sets _disposed → a deferred connect brings up NOTHING (mesh + relay both bail)", async () => {
     const shutdown = captureEventHandler("session_shutdown");
     await shutdown({ type: "session_shutdown", reason: "resume" });
@@ -3987,9 +3948,8 @@ describe("session_shutdown teardown", () => {
     try {
       process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
         agent_name: "session-relay-success",
-        auto_start_relay: true,
+        use_relay: true,
       });
-      _setAutoInitedForTest(true);
       _defaultConnectImpl = () => {
         connectAttempts += 1;
         return connectAttempts === 1 ? firstConnect.promise : Promise.resolve();
@@ -4022,7 +3982,6 @@ describe("session_shutdown teardown", () => {
       const stop = captureHandler("remote-pi stop");
       await stop("", replacementCtx);
       _resetCwdLockForTest();
-      _setAutoInitedForTest(false);
     }
   });
 
@@ -4038,9 +3997,8 @@ describe("session_shutdown teardown", () => {
     try {
       process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
         agent_name: "session-relay-reject",
-        auto_start_relay: true,
+        use_relay: true,
       });
-      _setAutoInitedForTest(true);
       _defaultConnectImpl = () => {
         connectAttempts += 1;
         return connectAttempts === 1 ? firstConnect.promise : Promise.resolve();
@@ -4077,7 +4035,6 @@ describe("session_shutdown teardown", () => {
       const stop = captureHandler("remote-pi stop");
       await stop("", replacementCtx);
       _resetCwdLockForTest();
-      _setAutoInitedForTest(false);
     }
   });
 
@@ -4102,9 +4059,8 @@ describe("session_shutdown teardown", () => {
     try {
       process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
         agent_name: "session-mesh-success",
-        auto_start_relay: true,
+        use_relay: true,
       });
-      _setAutoInitedForTest(true);
       const root = captureHandler("remote-pi");
       outgoingRoot = root("", outgoingCtx);
       await vi.waitFor(() => expect(connectSpy).toHaveBeenCalledTimes(1));
@@ -4134,7 +4090,6 @@ describe("session_shutdown teardown", () => {
       const stop = captureHandler("remote-pi stop");
       await stop("", replacementCtx);
       _resetCwdLockForTest();
-      _setAutoInitedForTest(false);
       outgoingCloseSpy?.mockRestore();
       connectSpy.mockRestore();
     }
@@ -4161,9 +4116,8 @@ describe("session_shutdown teardown", () => {
     try {
       process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
         agent_name: "session-mesh-reject",
-        auto_start_relay: true,
+        use_relay: true,
       });
-      _setAutoInitedForTest(true);
       const root = captureHandler("remote-pi");
       outgoingRoot = root("", outgoingCtx);
       await vi.waitFor(() => expect(connectSpy).toHaveBeenCalledTimes(1));
@@ -4197,7 +4151,6 @@ describe("session_shutdown teardown", () => {
       const stop = captureHandler("remote-pi stop");
       await stop("", replacementCtx);
       _resetCwdLockForTest();
-      _setAutoInitedForTest(false);
       outgoingCloseSpy?.mockRestore();
       connectSpy.mockRestore();
     }
@@ -4227,9 +4180,8 @@ describe("session_shutdown teardown", () => {
     try {
       process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
         agent_name: "root-lock-reject",
-        auto_start_relay: true,
+        use_relay: true,
       });
-      _setAutoInitedForTest(true);
 
       const root = captureHandler("remote-pi");
       const outgoingRoot = root("", outgoingCtx);
@@ -4269,7 +4221,6 @@ describe("session_shutdown teardown", () => {
       const stop = captureHandler("remote-pi stop");
       await stop("", replacementCtx);
       _resetCwdLockForTest();
-      _setAutoInitedForTest(false);
       acquireSpy.mockRestore();
     }
   });
@@ -4287,9 +4238,8 @@ describe("session_shutdown teardown", () => {
     try {
       process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
         agent_name: "root-lock-stop",
-        auto_start_relay: true,
+        use_relay: true,
       });
-      _setAutoInitedForTest(true);
 
       const shutdown = captureEventHandler("session_shutdown");
       await shutdown({ type: "session_shutdown", reason: "resume" });
@@ -4313,7 +4263,6 @@ describe("session_shutdown teardown", () => {
       const stop = captureHandler("remote-pi stop");
       await stop("", replacementCtx);
       _resetCwdLockForTest();
-      _setAutoInitedForTest(false);
       acquireSpy.mockRestore();
     }
   });
@@ -4331,9 +4280,8 @@ describe("session_shutdown teardown", () => {
     try {
       process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
         agent_name: "root-lock-relay-off",
-        auto_start_relay: true,
+        use_relay: true,
       });
-      _setAutoInitedForTest(true);
 
       const shutdown = captureEventHandler("session_shutdown");
       await shutdown({ type: "session_shutdown", reason: "resume" });
@@ -4356,7 +4304,6 @@ describe("session_shutdown teardown", () => {
       const stop = captureHandler("remote-pi stop");
       await stop("", replacementCtx);
       _resetCwdLockForTest();
-      _setAutoInitedForTest(false);
       acquireSpy.mockRestore();
     }
   });
@@ -4382,9 +4329,8 @@ describe("session_shutdown teardown", () => {
     try {
       process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
         agent_name: "root-lock-replacement",
-        auto_start_relay: true,
+        use_relay: true,
       });
-      _setAutoInitedForTest(true);
 
       const firstShutdown = captureEventHandler("session_shutdown");
       await firstShutdown({ type: "session_shutdown", reason: "resume" });
@@ -4416,7 +4362,6 @@ describe("session_shutdown teardown", () => {
       const stop = captureHandler("remote-pi stop");
       await stop("", newestReplacementCtx);
       _resetCwdLockForTest();
-      _setAutoInitedForTest(false);
       acquireSpy.mockRestore();
     }
   });
@@ -4487,7 +4432,7 @@ describe("remote-pi:name-assigned event", () => {
 describe("local config owns mesh name", () => {
   test("join ignores the Pi session display name", async () => {
     process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
-      agent_name: "crow", auto_start_relay: false,
+      agent_name: "crow", use_relay: false,
     });
     const root = captureHandler("remote-pi");
     _setPiForTest({ getSessionName: () => "pi-subagent-poison" });
@@ -4652,7 +4597,7 @@ describe("same-folder same-name → #N suffix (no refusal)", () => {
   test("a second same-name agent joins as <name>#2 instead of being refused", async () => {
     process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
       agent_name: "Backoffice",
-      auto_start_relay: false, // keep the test off the relay
+      use_relay: false, // keep the test off the relay
     });
     const cwd = "/home/user/projects/remote_pi";
     // Simulate the first agent already holding (cwd, "Backoffice").
@@ -4675,7 +4620,7 @@ describe("same-folder same-name → #N suffix (no refusal)", () => {
   test("concurrent startup in one extension instance does not self-suffix", async () => {
     process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
       agent_name: "Backoffice",
-      auto_start_relay: false,
+      use_relay: false,
     });
     const cwd = "/home/user/projects/remote_pi-concurrent";
     try {
@@ -4693,91 +4638,42 @@ describe("same-folder same-name → #N suffix (no refusal)", () => {
     }
   });
 
-  test("a supervised daemon refuses a busy base lock instead of joining as <name>#2", async () => {
-    process.env["REMOTE_PI_DAEMON"] = "1";
-    process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
-      agent_name: "Backoffice",
-      auto_start_relay: false,
-    });
-    const cwd = "/home/user/projects/remote_pi";
-    const first = await acquireCwdLock(cwd, "Backoffice");
-    expect(first.ok).toBe(true);
-    try {
-      const root = captureHandler("remote-pi");
-      const ctx = makeMockCtx(cwd);
-      await root("", ctx);
-
-      expect(_getLockedNameForTest()).toBeNull();
-      expect(_hasMeshNodeForTest()).toBe(false);
-      expect(ctx.ui.notify).toHaveBeenCalledWith(
-        expect.stringContaining("Daemon not started"),
-        "warning",
-      );
-    } finally {
-      if (first.ok) first.release();
-      delete process.env["REMOTE_PI_DAEMON"];
-      delete process.env["REMOTE_PI_DIRECT_CONFIG"];
-      _resetCwdLockForTest();
-    }
-  });
 });
 
-// ── print/-p mode never auto-starts the relay (issue #44) ────────────────────
-describe("session_start auto-init skips relay in print/-p mode (#44)", () => {
-  const savedArgv = process.argv;
+describe("session_start does not auto-connect", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
-    _knownPeers.length = 0;
-    _consumeCalls.length = 0;
     relayRef.current = null;
     relayInstances.length = 0;
     _defaultConnectImpl = async () => undefined;
     _setDisposedForTest(false);
-    _resetAutoInitedForTest();
     _resetCwdLockForTest();
     const stop = captureHandler("remote-pi stop");
     await stop("", makeMockCtx());
-    _resetAutoInitedForTest();
   });
   afterEach(() => {
-    process.argv = savedArgv;
     delete process.env["REMOTE_PI_DIRECT_CONFIG"];
     _resetCwdLockForTest();
   });
 
-  // A one-shot `pi -p "..."` prints its answer and must exit. Auto-starting the
-  // relay opens a WS that is never `.unref()`'d, so the process would hang.
-  test("`pi -p` does NOT bring up the mesh/relay on session_start", async () => {
+  test("local config does not start the mesh or relay until explicitly requested", async () => {
     process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
-      agent_name: "PrintAgent",
-      auto_start_relay: true,
+      agent_name: "ExplicitAgent",
+      use_relay: true,
     });
-    process.argv = ["node", "pi", "-p", "Say hello in one word."];
     const onSessionStart = captureEventHandler("session_start");
-    _resetAutoInitedForTest();
-    onSessionStart({ type: "session_start" }, makeMockCtx("/home/user/projects/rp-print"));
-    await new Promise<void>((r) => setTimeout(r, 20));
-
+    onSessionStart({ type: "session_start" }, makeMockCtx("/home/user/projects/rp-explicit"));
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
     expect(_hasMeshNodeForTest()).toBe(false);
     expect(relayInstances).toHaveLength(0);
-  });
 
-  // Guard the negative: a normal interactive session_start (no -p/--print) still
-  // auto-starts exactly as before, so the fix doesn't disable auto-init at large.
-  test("interactive session_start (no -p) still auto-starts the mesh", async () => {
-    process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
-      agent_name: "InteractiveAgent",
-      auto_start_relay: true,
-    });
-    process.argv = ["node", "pi"];
-    const onSessionStart = captureEventHandler("session_start");
-    _resetAutoInitedForTest();
-    onSessionStart({ type: "session_start" }, makeMockCtx("/home/user/projects/rp-interactive"));
-    await new Promise<void>((r) => setTimeout(r, 20));
-
+    const root = captureHandler("remote-pi");
+    await root("", makeMockCtx("/home/user/projects/rp-explicit"));
     expect(_hasMeshNodeForTest()).toBe(true);
+    expect(_getState()).toBe("started");
   });
 });
+
 
 // ── relay reconnect with backoff ──────────────────────────────────────────────
 
@@ -4820,7 +4716,7 @@ describe("relay reconnect", () => {
     try {
       process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
         agent_name: "join-cancel",
-        auto_start_relay: true,
+        use_relay: true,
       });
       const root = captureHandler("remote-pi");
       rootPromise = root("", makeMockCtx(cwd));
@@ -4947,9 +4843,8 @@ describe("relay reconnect", () => {
     try {
       process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
         agent_name: "keypair-replace-resolve",
-        auto_start_relay: true,
+        use_relay: true,
       });
-      _setAutoInitedForTest(true);
       getKeypair.mockImplementationOnce(() => keypairGate.promise);
 
       const root = captureHandler("remote-pi");
@@ -4986,7 +4881,6 @@ describe("relay reconnect", () => {
       const stop = captureHandler("remote-pi stop");
       await stop("", replacementCtx);
       _resetCwdLockForTest();
-      _setAutoInitedForTest(false);
     }
   });
 
@@ -5006,9 +4900,8 @@ describe("relay reconnect", () => {
     try {
       process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
         agent_name: "keypair-replace-reject",
-        auto_start_relay: true,
+        use_relay: true,
       });
-      _setAutoInitedForTest(true);
       getKeypair.mockImplementationOnce(() => keypairGate.promise);
 
       const root = captureHandler("remote-pi");
@@ -5046,7 +4939,6 @@ describe("relay reconnect", () => {
       const stop = captureHandler("remote-pi stop");
       await stop("", replacementCtx);
       _resetCwdLockForTest();
-      _setAutoInitedForTest(false);
     }
   });
 
@@ -5345,7 +5237,7 @@ describe("relay reconnect", () => {
     try {
       process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
         agent_name: "control-cancel",
-        auto_start_relay: false,
+        use_relay: false,
       });
       const root = captureHandler("remote-pi");
       await root("", makeMockCtx(cwd));
@@ -5726,19 +5618,18 @@ describe("model meta", () => {
     expect(capturedOpts[0]!.roomMeta?.cwd).toBe("/tmp/remote-pi-model-test");
   });
 
-  test("hello carries `model` from getModel() when ctx.model is absent (daemon path)", async () => {
+  test("hello carries `model` from getModel() when ctx.model is absent (headless RPC path)", async () => {
     const capturedOpts: Array<{ roomMeta?: { model?: string } }> = [];
     _defaultConnectImpl = async (opts?: unknown) => {
       capturedOpts.push(opts as { roomMeta?: { model?: string } });
     };
 
     captureHandler("remote-pi");
-    // A headless daemon never fires model_select and has no `ctx.model`, but
-    // its session resolved a default model that getModel() exposes — the fix
-    // seeds room_meta from there so the app no longer shows "unknown".
+    // A headless RPC context may not fire model_select or expose ctx.model;
+    // getModel() still reports its resolved session model.
     const ctx = {
       ui: { notify: vi.fn() },
-      cwd: "/tmp/remote-pi-daemon-model",
+      cwd: "/tmp/remote-pi-headless-model",
       abort: vi.fn(),
       getModel: () => ({ id: "claude-opus-4-8", name: "claude-opus-4.8" }),
     } as unknown as ReturnType<typeof makeMockCtx>;
@@ -5771,18 +5662,18 @@ describe("model meta", () => {
     }
   });
 
-  test("hello carries `model` from configured default settings (idle daemon path)", async () => {
-    // A headless daemon has no ctx.model/getModel at connect (the SDK resolves
+  test("hello carries `model` from configured default settings (idle RPC path)", async () => {
+    // A headless RPC context may not expose ctx.model/getModel at connect.
     // the session model lazily at the first turn). The fix reads the configured
-    // default from <cwd>/.pi/settings.json — the model the daemon WILL use.
-    const cwd = mkdtempSync(join(tmpdir(), "pi-daemon-cfg-"));
+    // default from <cwd>/.pi/settings.json — the model this session will use.
+    const cwd = mkdtempSync(join(tmpdir(), "pi-headless-cfg-"));
     mkdirSync(join(cwd, ".pi"), { recursive: true });
     writeFileSync(
       join(cwd, ".pi", "settings.json"),
       JSON.stringify({ defaultProvider: "acme", defaultModel: "acme-model-zzz" }),
     );
     const prevAgentDir = process.env["PI_CODING_AGENT_DIR"];
-    process.env["PI_CODING_AGENT_DIR"] = "/tmp/pi-no-such-agent-dir-daemon";
+    process.env["PI_CODING_AGENT_DIR"] = "/tmp/pi-no-such-agent-dir-headless";
     try {
       const capturedOpts: Array<{ roomMeta?: { model?: string } }> = [];
       _defaultConnectImpl = async (opts?: unknown) => {

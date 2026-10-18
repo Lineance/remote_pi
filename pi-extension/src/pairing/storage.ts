@@ -65,10 +65,8 @@ export class PairedIdentityMissingError extends Error {
     super(
       `No identity could be read, but ${pairedCount} device(s) are already ` +
       "paired. Refusing to generate a NEW identity — that would revoke every " +
-      "paired device. This usually means this process cannot reach the same " +
-      "keyring as the session that paired (e.g. a systemd --user daemon vs. " +
-      "your desktop session). Fix the service's keyring access, or pin the " +
-      "identity by copying the paired keypair to ~/.pi/remote/identity.json " +
+      "paired device. This process may not have access to the keyring used by " +
+      "the session that paired. Copy the paired keypair to ~/.pi/remote/identity.json " +
       "(0600), which both contexts read first. " +
       `Cause: ${String(cause)}`,
     );
@@ -405,16 +403,9 @@ export async function getOrCreateEd25519Keypair(): Promise<Ed25519Keypair> {
   // Issues #95 / #69 — minting a NEW identity when devices are already paired
   // is destructive, on every platform.
   //
-  // A daemon started by `systemd --user` resolves a different secret-service
-  // store than the desktop session that ran the pairing, so the keyring read
-  // fails, this path mints a fresh Ed25519 key, and the SelfRevoke poller then
-  // finds that key absent from the relay-side owner envelope, concludes it was
-  // revoked, and wipes `peers.json` — the phone silently goes offline a few
-  // seconds after every `daemon start`. `peers.json` being non-empty is proof
-  // that a working identity existed, so "no key found" here is a broken
-  // environment, not a first run. Fail loud and keep the pairing intact; the
-  // operator can pin the identity to a file (the confirmed workaround) or fix
-  // the service's keyring access.
+  // A non-interactive process may resolve a different secret-service store
+  // than the session that paired. When peers already exist, never mint a
+  // replacement identity; recover the original key instead.
   if (!forceFile) {
     const paired = await listPeers();
     if (paired.length > 0) {

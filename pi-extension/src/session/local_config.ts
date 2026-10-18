@@ -5,24 +5,15 @@ const LOCAL_DIR = ".pi/remote-pi";
 const LOCAL_FILE = "config.json";
 
 /**
- * Escape hatch: when set, carries the WHOLE local config as inline JSON,
- * bypassing the on-disk `config.json`. For CI/ops/daemons that inject config
- * via env instead of writing a file — mirrors `REMOTE_PI_RELAY` for the relay
- * URL. Takes precedence over the file; an unset/empty/unparseable value falls
- * back to the file (never fatal).
+ * Escape hatch for CI and external launchers that inject local config without
+ * writing a per-directory config file.
  */
 const DIRECT_CONFIG_ENV = "REMOTE_PI_DIRECT_CONFIG";
 
 export interface LocalConfig {
   agent_name?: string;
-  /**
-   * If true (default), `/remote-pi` with no args auto-joins the local UDS
-   * mesh and starts the relay on a fresh terminal. The field name is
-   * historical (plano 21); the UX wording was reworked to "use the relay
-   * on this terminal to connect to the remote mesh (mobile + PCs)". Legacy
-   * configs without this field are treated as `true` for backward compat.
-   */
-  auto_start_relay?: boolean;
+  /** Whether the explicit `/remote-pi` command should connect the relay. */
+  use_relay?: boolean;
   // `workspace?`/`worktree?` were removed (plan/38, reescrito 2026-06-08): the
   // mesh identity is `(cwd, nome)`, with `cwd` subsuming folder + worktree
   // disambiguation. Neither axis is derived anymore, so the config fields are
@@ -96,7 +87,8 @@ function parseLocalConfig(raw: string): LocalConfig | null {
     const migrated = migrateAgentName(src["agent_name"]);
     if (migrated) cfg.agent_name = migrated;
   }
-  if (typeof src["auto_start_relay"] === "boolean") cfg.auto_start_relay = src["auto_start_relay"];
+  const useRelay = src["use_relay"] ?? src["auto_start_relay"];
+  if (typeof useRelay === "boolean") cfg.use_relay = useRelay;
   return cfg;
 }
 
@@ -134,10 +126,8 @@ export function saveLocalConfig(cwd: string, patch: Partial<LocalConfig>): void 
   const p = pathFor(cwd);
   const current = loadLocalConfig(cwd);
   const next: LocalConfig = { ...current, ...patch };
-  // Always persist auto_start_relay explicitly (default true) so future reads
-  // never need to guess. Backward-compat: legacy files without the field
-  // are treated as true on read; we lock that intent in on first save.
-  if (typeof next.auto_start_relay !== "boolean") next.auto_start_relay = true;
+  // Legacy auto_start_relay configs are read as use_relay; persist the new key.
+  if (typeof next.use_relay !== "boolean") next.use_relay = true;
   // Best-effort persistence: a read-only config.json is a legitimate deployment
   // (NixOS/Home Manager symlink into the immutable Nix store, read-only root,
   // EPERM). The name/config sync is cosmetic — it must NEVER crash the pi
@@ -165,9 +155,4 @@ export function saveLocalConfig(cwd: string, patch: Partial<LocalConfig>): void 
  */
 export function defaultAgentName(cwd: string): string {
   return basename(cwd) || "agent";
-}
-
-/** Resolves auto_start_relay with backward-compat (undefined → true). */
-export function effectiveAutoStartRelay(cfg: LocalConfig): boolean {
-  return cfg.auto_start_relay !== false;
 }

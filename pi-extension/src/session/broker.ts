@@ -177,7 +177,7 @@ interface RegisterMsg {
    *  `_handleRegister`). Absent → legacy `#N`-on-collision behavior. */
   cwd?: string;
   /** Replace an existing same-(cwd,name) peer instead of suffixing `#N`.
-   *  Used by stable identities such as supervised daemons and session
+   *  Used by stable identities across Pi sessions and session
    *  replacement, where a second registration is the same logical agent. */
   takeover?: boolean;
 }
@@ -353,7 +353,7 @@ export class Broker {
     // address embeds it, so two same-named agents in DIFFERENT folders get
     // distinct addresses and never collide. Legacy peers (no cwd) keep the old
     // global-name behavior. New peers can opt into exact-address takeover for
-    // same-folder reincarnations such as daemon restarts.
+    // same-folder session replacements.
     const requestedCwd = req.cwd === undefined ? "" : req.cwd;
     if (typeof requestedCwd !== "string" || !isValidRegisteredCwd(requestedCwd)) {
       conn.socket.destroy();

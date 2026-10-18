@@ -8,7 +8,6 @@ import {
   loadLocalConfig,
   localConfigExists,
   saveLocalConfig,
-  effectiveAutoStartRelay,
 } from "./local_config.js";
 
 const YES = "Yes";
@@ -47,7 +46,7 @@ function makeUI(answers: Array<string | undefined>): WizardUI & {
 }
 
 describe("runSetupWizard (2 prompts + confirm)", () => {
-  test("1) accepts answers end-to-end → returns config (no daemon prompt)", async () => {
+  test("1) accepts answers end-to-end → returns config", async () => {
     // Sequence: agent name (input), use_relay (Yes), confirm (Yes)
     const ui = makeUI(["my-agent", YES, YES]);
     const cfg = await runSetupWizard(ui, {
@@ -56,7 +55,7 @@ describe("runSetupWizard (2 prompts + confirm)", () => {
     });
     expect(cfg).toEqual({
       agent_name: "my-agent",
-      auto_start_relay: true,
+      use_relay: true,
     });
   });
 
@@ -69,11 +68,11 @@ describe("runSetupWizard (2 prompts + confirm)", () => {
     });
     expect(cfg).toEqual({
       agent_name: "foo",
-      auto_start_relay: true,
+      use_relay: true,
     });
   });
 
-  test("2b) prompt labels surface the default as hint; no daemon prompt", async () => {
+  test("2b) prompt labels surface the default as hint", async () => {
     const ui = makeUI(["my-agent", YES, YES]);
     await runSetupWizard(ui, {
       agent_name: "default-name",
@@ -112,7 +111,7 @@ describe("runSetupWizard (2 prompts + confirm)", () => {
     expect(cfg).toBeNull();
   });
 
-  test("4) use_relay=No produces auto_start_relay=false", async () => {
+  test("4) use_relay=No produces use_relay=false", async () => {
     // When default is false, the picker shows [No, Yes]. We answer with the
     // first ("No") to confirm the off path. Then confirm Yes.
     const ui = makeUI(["agent", NO, YES]);
@@ -121,7 +120,7 @@ describe("runSetupWizard (2 prompts + confirm)", () => {
     });
     expect(cfg).toEqual({
       agent_name: "agent",
-      auto_start_relay: false,
+      use_relay: false,
     });
   });
 
@@ -137,10 +136,6 @@ describe("runSetupWizard (2 prompts + confirm)", () => {
         n.msg.includes("Remote Pi mobile app"),
       ),
     ).toBe(true);
-    // No daemon-context notify — daemon mode was removed from the wizard.
-    expect(
-      ui.notifies.some((n) => n.msg.includes("Daemon mode")),
-    ).toBe(false);
   });
 });
 
@@ -150,13 +145,13 @@ describe("localConfig integration with the wizard", () => {
     expect(localConfigExists(cwd)).toBe(false);
     saveLocalConfig(cwd, {
       agent_name: "x",
-      auto_start_relay: true,
+      use_relay: true,
     });
     expect(localConfigExists(cwd)).toBe(true);
     const persisted = loadLocalConfig(cwd);
     expect(persisted).toMatchObject({
       agent_name: "x",
-      auto_start_relay: true,
+      use_relay: true,
     });
   });
 
@@ -164,28 +159,28 @@ describe("localConfig integration with the wizard", () => {
     // Simulates the data flow without invoking the real handler.
     const cwd = tmpCwd();
     saveLocalConfig(cwd, {
-      agent_name: "old", auto_start_relay: false,
+      agent_name: "old", use_relay: false,
     });
     const current = loadLocalConfig(cwd);
-    expect(current.auto_start_relay).toBe(false);
+    expect(current.use_relay).toBe(false);
 
     const ui = makeUI(["new", YES, YES]);
     const cfg = await runSetupWizard(ui, {
       agent_name: current.agent_name!,
-      use_relay: effectiveAutoStartRelay(current),
+      use_relay: current.use_relay ?? true,
     });
     expect(cfg).toEqual({
       agent_name: "new",
-      auto_start_relay: true,
+      use_relay: true,
     });
     // The wizard now returns a plain LocalConfig — persist it directly.
     saveLocalConfig(cwd, cfg!);
     const updated = loadLocalConfig(cwd);
     expect(updated.agent_name).toBe("new");
-    expect(updated.auto_start_relay).toBe(true);
+    expect(updated.use_relay).toBe(true);
   });
 
-  test("legacy config without auto_start_relay → treated as true", () => {
+  test("legacy config without use_relay → treated as true", () => {
     const cwd = tmpCwd();
     const cfgPath = join(cwd, ".pi", "remote-pi", "config.json");
     const { mkdirSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
@@ -196,16 +191,25 @@ describe("localConfig integration with the wizard", () => {
     );
 
     const loaded = loadLocalConfig(cwd);
-    expect(loaded.auto_start_relay).toBeUndefined();
-    expect(effectiveAutoStartRelay(loaded)).toBe(true);
+    expect(loaded.use_relay).toBeUndefined();
+    expect(loaded.use_relay ?? true).toBe(true);
 
     saveLocalConfig(cwd, { agent_name: "legacy-renamed" });
     const reloaded = loadLocalConfig(cwd);
-    expect(reloaded.auto_start_relay).toBe(true);
+    expect(reloaded.use_relay).toBe(true);
     expect(reloaded.agent_name).toBe("legacy-renamed");
     expect(existsSync(cfgPath)).toBe(true);
     const raw = JSON.parse(readFileSync(cfgPath, "utf8")) as Record<string, unknown>;
-    expect(raw["auto_start_relay"]).toBe(true);
+    expect(raw["use_relay"]).toBe(true);
+  });
+
+  test("legacy auto_start_relay is read as use_relay", () => {
+    const cwd = tmpCwd();
+    const cfgPath = join(cwd, ".pi", "remote-pi", "config.json");
+    const { mkdirSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+    mkdirSync(join(cwd, ".pi", "remote-pi"), { recursive: true });
+    writeFileSync(cfgPath, JSON.stringify({ agent_name: "legacy", auto_start_relay: false }));
+    expect(loadLocalConfig(cwd)).toEqual({ agent_name: "legacy", use_relay: false });
   });
 
   test("legacy config with session_name field is silently dropped on load", () => {
@@ -221,14 +225,14 @@ describe("localConfig integration with the wizard", () => {
       JSON.stringify({
         agent_name: "legacy",
         session_name: "old-session",
-        auto_start_relay: true,
+        use_relay: true,
       }, null, 2),
     );
 
     const loaded = loadLocalConfig(cwd);
     expect(loaded.agent_name).toBe("legacy");
     expect((loaded as Record<string, unknown>)["session_name"]).toBeUndefined();
-    expect(loaded.auto_start_relay).toBe(true);
+    expect(loaded.use_relay).toBe(true);
   });
 });
 

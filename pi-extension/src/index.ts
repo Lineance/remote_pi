@@ -94,14 +94,8 @@ import {
   skillsDir,
 } from "./session/global_config.js";
 import { acquireCwdLock, type AcquiredLock } from "./session/cwd_lock.js";
-import { addDaemon, listDaemons, removeDaemon } from "./daemon/registry.js";
-import { callSupervisor, supervisorOnline, SupervisorOfflineError } from "./daemon/client.js";
-import type { ControlRequest, DaemonInfo } from "./daemon/control_protocol.js";
-import { EXIT_DAEMON_FRESH_SESSION } from "./daemon/rpc_child.js";
-import { installService, uninstallService, linkCliBinaries, unlinkCliBinaries, LAUNCHD_LABEL, SYSTEMD_UNIT, WINDOWS_TASK_NAME } from "./daemon/install.js";
 import {
   defaultAgentName,
-  effectiveAutoStartRelay,
   loadLocalConfig,
   localConfigExists,
   saveLocalConfig,
@@ -111,8 +105,6 @@ import { updateFooter, type FooterState } from "./ui/footer.js";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chmodSync, mkdtempSync, mkdirSync, copyFileSync, existsSync, unlinkSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
-import { createInterface } from "node:readline";
-import { spawnSync } from "node:child_process";
 import { hostname, tmpdir } from "node:os";
 import {
   kDefaultRelayUrl,
@@ -245,12 +237,6 @@ let _meshJoinGeneration = 0;
 // relay/mesh generations below permanently distinguish the old candidates from
 // that replacement lifecycle even after `_disposed` becomes false again.
 let _disposed = false;
-// True once the auto-init has run on the first session_start for this
-// process. Prevents re-running on session replacements (those re-init via
-// the _disposed re-arm path above). The session_start handler below auto-starts
-// remote-pi for ANY session whose local config has auto_start_relay (default
-// true) — interactive AND daemon — instead of only REMOTE_PI_DAEMON=1.
-let _autoInited = false;
 
 // Cached state of global pairings (`peers.json`). Pairing is per-machine, so a
 // device paired in any Pi process is paired everywhere. Refreshed on boot,
@@ -296,10 +282,9 @@ function _currentModelName(): string | undefined {
  * Cache the active model name and fan it out to subscribed apps via a
  * `room_meta_update`. The relay push is a no-op when the room isn't up yet —
  * the next `room_meta` hello carries the cached value instead. Shared by the
- * `model_select` event and the connect/turn-start seeding, so a daemon that
- * just runs its DEFAULT model still reports it: `model_select` only fires on an
- * explicit set/cycle (never on settings load), so default-model daemons would
- * otherwise never surface their model.
+ * `model_select` event and connect/turn-start seeding, so a headless RPC
+ * process using its configured default model still reports it. `model_select`
+ * only fires after an explicit change, not when settings load.
  */
 function _setCurrentModel(name: string): void {
   _currentModel = name;
@@ -989,11 +974,7 @@ export async function _stopForTest(ctx: unknown): Promise<void> {
 export function _getDisposedForTest(): boolean { return _disposed; }
 export function _setDisposedForTest(v: boolean): void { _disposed = v; }
 
-/** Test-only: reset the once-per-session auto-init gate so session_start re-runs it. */
-export function _resetAutoInitedForTest(): void { _autoInited = false; }
 
-/** Test-only: set the auto-init gate for lifecycle replacement tests. */
-export function _setAutoInitedForTest(value: boolean): void { _autoInited = value; }
 
 /** Test-only: true when this instance holds a live local-mesh node. */
 export function _hasMeshNodeForTest(): boolean { return _meshNode !== null; }
@@ -1067,14 +1048,10 @@ export function _setPiForTest(pi: unknown): void {
 
 /**
  * Persist a model change to the PROJECT settings (`<cwd>/.pi/settings.json`) so
- * a model picked from the app survives a Pi/daemon restart. `pi.setModel` only
- * sets the LIVE model — on the next restart a fresh session reads the saved
- * default and reverts (the reported bug). We write the PROJECT scope, NOT
- * global, deliberately: the SDK merges global←project with PROJECT winning
- * (`SettingsManager`), so a folder that already has a project default (every
- * created daemon does) would shadow a global write like the TUI's. Project
- * scope is also correct for a fleet — each daemon keeps its own model rather
- * than leaking one default globally.
+ * a model picked from the app survives a later Pi session. `pi.setModel` only
+ * sets the LIVE model — on the next session a fresh process reads the saved
+ * default. We write the PROJECT scope because it overrides global settings and
+ * keeps model choices local to this folder.
  *
  * Read-merge-write + best-effort: preserves other keys and never throws (a
  * settings write must not fail the live model change, which already applied).
@@ -1623,9 +1600,10 @@ function _emitRelayState(force = false): void {
   }
 }
 
-/** Minimal ctx for relay start/stop driven by a control message (no command
- *  ctx is available in the `input` hook). cwd matches the daemon's launch dir,
- *  so the derived relay room is identical to the one `_cmdStart` first used. */
+/** Minimal context for relay control received through the input hook. The
+ *  current working directory determines the relay room just like an explicit
+ *  slash command.
+ */
 function _controlCtx(): Pick<ExtensionContext, "ui" | "cwd"> {
   return {
     ui: _headlessUi(),
@@ -1634,13 +1612,9 @@ function _controlCtx(): Pick<ExtensionContext, "ui" | "cwd"> {
 }
 
 /**
- * `ui.notify` for headless contexts (daemon auto-init + control channel). There
- * is no TUI, and the RPC client (Cockpit) already gets everything it needs via
- * structured events (`remote-pi:relay-state`, `remote-pi:name-assigned`,
- * room_meta) — so routine INFO chatter would just pollute the client's captured
- * stderr. We drop info and forward only warnings/errors (kept for the
- * supervisor's journal / genuine failures). The interactive Pi keeps its normal
- * footer/notify path — this only affects headless ctxs.
+ * `ui.notify` for an RPC control path. There is no TUI, and the client already
+ * receives structured relay state events, so routine INFO chatter would only
+ * pollute captured stderr. Warnings and errors remain visible.
  */
 function _headlessUi(): { notify: (msg: string, type?: "info" | "warning" | "error") => void } {
   return {
@@ -2042,17 +2016,8 @@ let _lastCtx: Pick<ExtensionContext, "ui" | "abort" | "cwd"> | null = null;
 let _lastEventCtx: Pick<ExtensionContext, "compact" | "abort" | "ui"> | null = null;
 const _noopCtx = { ui: { notify: () => undefined }, abort: () => undefined };
 
-// A single Pi process can load this extension TWICE in the SAME session:
-// pi-supervisord launches each daemon child as `pi -e <dist>/index.js`, but if
-// remote-pi is ALSO installed as a pi-package (auto-discovered from
-// ~/.pi/agent/extensions or <cwd>/.pi/extensions), Pi loads it a second time
-// for that same session. Both loads receive the same session-scoped `pi` and
-// would re-run registerTool/registerCommand for identical names — a hard
-// duplicate-registration conflict that crashes the daemon child on boot (see
-// daemon/rpc_child.ts). Idempotent, first-load-wins: whichever load runs first
-// does all the wiring; the duplicate is an inert no-op. A genuine session
-// REPLACEMENT gets a FRESH `pi`, so re-registration for the new session still
-// happens.
+// The extension may be discovered both as a Pi package and through an
+// explicit extension path. Keep registration idempotent for a session API.
 //
 // We track "already wired" in a process-global WeakSet keyed by `pi` rather
 // than by mutating the host SDK object. The two loads are DISTINCT module
@@ -2278,8 +2243,7 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
   // broker and drives the app's working indicator.
   pi.on("turn_start", (_event, ctx) => {
     // Late model hydration: if the model was still unknown at connect (resolved
-    // lazily by the SDK), grab it on the first turn and fan it out — so a daemon
-    // whose model only materialises at turn 1 still reports it to the app.
+    // lazily by the SDK), grab it on the first turn and fan it out to the app.
     if (!_currentModel) {
       try {
         const m = (ctx as Partial<ExtensionContext> & { getModel?: () => { name?: string; id?: string } | undefined }).getModel?.();
@@ -2361,51 +2325,6 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
       };
       void _cmdRoot(ctx, restartAuthority);
     }
-    // Auto-start remote-pi on a fresh boot when the cwd's local config has
-    // auto_start_relay enabled (default true). Covers BOTH interactive
-    // sessions (previously required typing /remote-pi each session) AND
-    // headless daemons. We init here — on session_start — NOT via a
-    // factory-return setTimeout(0): the SDK only calls bindCore() (which
-    // replaces the throwing action-method stubs like pi.sendMessage) right
-    // before emitting session_start, so a setTimeout(0) from the factory
-    // raced it and crashed with "Extension runtime not initialized" inside
-    // _emitRelayState -> sendMessage. session_start fires strictly AFTER
-    // bindCore (agent-session bindExtensions), so pi.sendMessage is a real
-    // function here. Guarded by _autoInited so session replacements re-init
-    // only via the _disposed path above. Daemon mode has no interactive UI →
-    // use the headless ctx; interactive sessions use the real session_start
-    // ctx (has ui.notify + dialogs for the first-run wizard).
-    if (!_autoInited) {
-      // Daemon: always init (supervisor sets REMOTE_PI_DIRECT_CONFIG so a config
-      // is present at process.cwd()). Interactive: only init when the
-      // session_start ctx announces its cwd AND a local config already exists
-      // there — never auto-pop the first-run wizard on session_start (a new dir
-      // with no config stays idle until the user runs /remote-pi once). The
-      // cwd guard also keeps tests with a minimal ctx (no cwd) from triggering
-      // the wizard path.
-      const isDaemon = process.env["REMOTE_PI_DAEMON"] === "1";
-      // One-shot / non-interactive Pi (`pi -p` / `pi --print`) is documented as
-      // "process the prompt and exit". Auto-starting the relay there opens a WS
-      // that is never `.unref()`'d, so the idle Node event loop never drains and
-      // the process hangs forever after printing its answer (issue #44). Daemon
-      // mode (REMOTE_PI_DAEMON=1) and normal interactive sessions never pass
-      // `-p`/`--print`, so they still auto-start the relay exactly as before.
-      const isPrintMode =
-        process.argv.includes("-p") || process.argv.includes("--print");
-      const cwd = isDaemon ? process.cwd() : "cwd" in ctx ? ctx.cwd : undefined;
-      if (
-        !isPrintMode &&
-        cwd &&
-        localConfigExists(cwd) &&
-        effectiveAutoStartRelay(loadLocalConfig(cwd))
-      ) {
-        _autoInited = true;
-        const initCtx = isDaemon
-          ? ({ ui: _headlessUi(), cwd: process.cwd() } as Pick<ExtensionContext, "ui" | "cwd">)
-          : ctx;
-        void _cmdRoot(initCtx);
-      }
-    }
   });
 
   // Tear down THIS instance's live handles when the SDK replaces the session
@@ -2418,13 +2337,7 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
   // FRESH — a brand-new instance whose `_meshNode`, `_relay`, and `_cwdLock`
   // start back at null. The OUTGOING instance's broker socket, relay WS, and
   // cwd-lock UDS keep running regardless (module state is gone, but the OS
-  // handles aren't). In daemon mode (REMOTE_PI_DAEMON=1, set by the Cockpit) the
-  // fresh instance re-runs `_cmdRoot` on load, so without releasing the old
-  // handles first we end up with TWO mesh peers under the same name on the
-  // broker + two rooms on the relay. The per-cwd lock is meant to stop the
-  // second connect, but its 500 ms connect-probe can miss the still-bound old
-  // socket while the event loop is saturated at boot, fall through to the
-  // stale-socket unlink path, and let the fresh instance bind a second lock.
+  // Sessions replaced by the SDK are torn down before the next extension instance is loaded.
   //
   // `session_shutdown` fires on the OUTGOING extension runner and is AWAITED by
   // the SDK (`teardownCurrent`) BEFORE the replacement runtime — and thus the
@@ -2502,13 +2415,6 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
         "relay", "relay start", "relay stop", "relay status", "relay url",
         "config",
         "peers",  // plan/25 Wave D — local + cross-PC inventory
-        "create", "remove", "daemons",  // daemon registry (plan/26 W1)
-        // Fleet ops use the `daemon` prefix so `/remote-pi stop` keeps
-        // meaning "stop this local Pi" — the local UX shipped in plan/25.
-        "daemon start", "daemon stop", "daemon restart",
-        "daemon send", "daemon status",
-        "cron", "cron add", "cron list", "cron remove", "cron enable", "cron disable", "cron run", "cron log",
-        "install", "uninstall",  // service install (plan/26 W3)
       ]
         .filter((o) => o.startsWith(prefix))
         .map((o) => ({ value: o, label: o }));
@@ -2528,17 +2434,6 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
       else if (sub === "config")                 { _cmdConfig(ctx); }
       else if (sub === "rename" || sub.startsWith("rename ")) { await _renameAgent(sub.slice("rename".length).trim()); }
       else if (sub === "peers")                  { await _cmdPeers(ctx); }
-      else if (sub.startsWith("create"))         { await _cmdCreate(sub.slice("create".length).trim(), ctx); }
-      else if (sub.startsWith("remove"))         { await _cmdRemove(sub.slice("remove".length).trim(), ctx); }
-      else if (sub === "daemons")                { await _cmdDaemonsList(ctx); }
-      else if (sub === "daemon start" || sub.startsWith("daemon start "))     { await _cmdDaemonStart(ctx, sub.slice("daemon start".length).trim() || undefined); }
-      else if (sub === "daemon stop" || sub.startsWith("daemon stop "))       { await _cmdDaemonStop(ctx, sub.slice("daemon stop".length).trim() || undefined); }
-      else if (sub === "daemon restart" || sub.startsWith("daemon restart ")) { await _cmdDaemonRestart(ctx, sub.slice("daemon restart".length).trim() || undefined); }
-      else if (sub === "daemon status")          { await _cmdDaemonStatus(ctx); }
-      else if (sub.startsWith("daemon send"))    { await _cmdDaemonSend(sub.slice("daemon send".length).trim(), ctx); }
-      else if (sub === "cron" || sub.startsWith("cron ")) { await _cmdCron(sub.slice("cron".length).trim(), ctx); }
-      else if (sub === "install")                { _cmdInstall(ctx, { linkCli: true }); }
-      else if (sub === "uninstall")              { _cmdUninstall(ctx, { linkCli: true }); }
       else                                       { await _cmdRoot(ctx); }
     },
   });
@@ -2567,38 +2462,6 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     handler: async (_, ctx) => { _lastCtx = ctx; await _cmdPeers(ctx); },
   });
 
-  // Daemon registry (plan/26 Wave 1) — create + remove. start/stop/send/
-  // status/install/uninstall come in later waves with the supervisor.
-  pi.registerCommand("remote-pi create", {
-    description: "Register a folder as a daemon and start it (when the supervisor is running)",
-    handler: async (args, ctx) => { _lastCtx = ctx; await _cmdCreate(args.trim(), ctx); },
-  });
-  pi.registerCommand("remote-pi remove", {
-    description: "Stop + unregister a daemon by id (local config is preserved)",
-    handler: async (args, ctx) => { _lastCtx = ctx; await _cmdRemove(args.trim(), ctx); },
-  });
-
-  // Fleet ops via the supervisor (plan/26 W2). `/remote-pi stop` stays as
-  // local stop — fleet stop is `/remote-pi daemon stop`.
-  pi.registerCommand("remote-pi daemons",        { description: "List registered daemons + state", handler: async (_, ctx) => { _lastCtx = ctx; await _cmdDaemonsList(ctx); } });
-  pi.registerCommand("remote-pi daemon start",   { description: "Start daemons: all, or one by id (`daemon start <id>`)", handler: async (args, ctx) => { _lastCtx = ctx; await _cmdDaemonStart(ctx, args.trim() || undefined); } });
-  pi.registerCommand("remote-pi daemon stop",    { description: "Stop daemons: all, or one by id (`daemon stop <id>`)", handler: async (args, ctx) => { _lastCtx = ctx; await _cmdDaemonStop(ctx, args.trim() || undefined); } });
-  pi.registerCommand("remote-pi daemon restart", { description: "Restart daemons: all, or one by id (`daemon restart <id>`)", handler: async (args, ctx) => { _lastCtx = ctx; await _cmdDaemonRestart(ctx, args.trim() || undefined); } });
-  pi.registerCommand("remote-pi daemon status",  { description: "Show fleet runtime status (pid, uptime, restarts)", handler: async (_, ctx) => { _lastCtx = ctx; await _cmdDaemonStatus(ctx); } });
-  pi.registerCommand("remote-pi daemon send",    { description: "Send a prompt to a daemon: `daemon send <id> \"<text>\"`", handler: async (args, ctx) => { _lastCtx = ctx; await _cmdDaemonSend(args.trim(), ctx); } });
-  pi.registerCommand("remote-pi cron",           { description: "Schedule recurring prompts to daemons: `cron <add|list|remove|enable|disable|run|log>`", handler: async (args, ctx) => { _lastCtx = ctx; await _cmdCron(args.trim(), ctx); } });
-
-  // Service install / uninstall (plan/26 W3)
-  pi.registerCommand("remote-pi install",   { description: "Install pi-supervisord as a system service + link the remote-pi CLI (systemd/launchd/Task Scheduler; Windows prompts for admin)", handler: async (_, ctx) => { _lastCtx = ctx; _cmdInstall(ctx, { linkCli: true }); } });
-  pi.registerCommand("remote-pi uninstall", { description: "Remove the pi-supervisord system service + the CLI shims (daemons registry preserved; Windows prompts for admin)", handler: async (_, ctx) => { _lastCtx = ctx; _cmdUninstall(ctx, { linkCli: true }); } });
-
-  // Auto-init now runs from the session_start handler (above), AFTER the
-  // SDK calls bindCore(). The original setTimeout(0) here fired before bindCore
-  // replaced the throwing action-method stubs, so the first pi.sendMessage in
-  // _emitRelayState crashed the headless pi process with "Extension runtime not
-  // initialized" in a 5s supervisor crash-loop. The session_start handler now
-  // auto-starts for ANY session with auto_start_relay (default true), so new
-  // interactive pi sessions are on remote automatically — no /remote-pi needed.
 };
 
 export default extension;
@@ -2726,14 +2589,10 @@ async function _cmdRootInner(
   // `_cmdJoin` does so the lock and the mesh registration agree on identity.
   const requestedName = loadLocalConfig(cwd).agent_name || defaultAgentName(cwd);
 
-  // Per-(cwd,name) lock. Interactive agents may coexist by auto-suffixing
-  // (`name#2`, `name#3`, …), but supervised daemons must be singletons for their
-  // registered cwd/name. If a daemon silently came up as `#2`, the supervisor
-  // would report "running" while the mesh had duplicate peers for one repo.
+  // Per-(cwd,name) lock lets interactive agents coexist by auto-suffixing
+  // when the same name is already active in that folder.
   if (_cwdLock === null) {
-    const isDaemon = process.env["REMOTE_PI_DAEMON"] === "1";
-    const maxAttempts = isDaemon ? 1 : 1000;
-    for (let n = 1; n <= maxAttempts; n++) {
+    for (let n = 1; n <= 1000; n++) {
       const candidate = n === 1 ? requestedName : `${requestedName}#${n}`;
       const result = await acquireCwdLock(cwd, candidate);
       if (!_isCurrentRootLifecycle(rootLifecycleGeneration)) {
@@ -2747,9 +2606,7 @@ async function _cmdRootInner(
     if (_cwdLock === null) {
       if (!_isCurrentRootLifecycle(rootLifecycleGeneration)) return;
       ctx.ui.notify(
-        process.env["REMOTE_PI_DAEMON"] === "1"
-          ? `[remote-pi] Daemon not started: another live agent already owns "${requestedName}" in this folder. Stop the old Pi process, then restart the daemon.`
-          : `[remote-pi] Could not start: too many agents named "${requestedName}" already running in this folder.`,
+        `[remote-pi] Could not start: too many agents named "${requestedName}" already running in this folder.`,
         "warning",
       );
       return;
@@ -2781,24 +2638,19 @@ async function _cmdRootInner(
     if (!_isCurrentRootLifecycle(rootLifecycleGeneration)) return;
     await _cmdJoin(ctx);
     if (!_isCurrentRootLifecycle(rootLifecycleGeneration) || !_meshNode) return;
-    if (effectiveAutoStartRelay(newConfig)) await _cmdStart(ctx);
+    if (newConfig.use_relay) await _cmdStart(ctx);
     if (!_isCurrentRootLifecycle(rootLifecycleGeneration) || !_meshNode) return;
     _cmdStatus(ctx);
     return;
   }
 
-  // Returning user with config: ALWAYS join the local UDS mesh on connect; the
-  // relay is the only thing gated by auto_start_relay. So auto_start_relay:false
-  // now means "local mesh, no relay" (matching the first-time/wizard path and
-  // the field's documented intent) — previously a false flag skipped the mesh
-  // join entirely, leaving the agent (incl. daemons) fully idle.
   const config = loadLocalConfig(cwd);
   if (!_isCurrentRootLifecycle(rootLifecycleGeneration)) return;
   if (!_meshNode) await _cmdJoin(ctx);
   // `_cmdJoin` returns void on a canceled/failed join, so recheck both the
   // root lifecycle and publication before bringing the Relay up.
   if (!_isCurrentRootLifecycle(rootLifecycleGeneration) || !_meshNode) return;
-  if (effectiveAutoStartRelay(config) && _state === "idle") await _cmdStart(ctx);
+  if (config.use_relay !== false && _state === "idle") await _cmdStart(ctx);
   if (!_isCurrentRootLifecycle(rootLifecycleGeneration) || !_meshNode) return;
   _cmdStatus(ctx);
 }
@@ -2818,7 +2670,7 @@ async function _cmdSetup(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<voi
   const baseDefault = defaultAgentName(cwd);
   const newConfig = await runSetupWizard(ui, {
     agent_name: current.agent_name ?? baseDefault,
-    use_relay: effectiveAutoStartRelay(current),
+    use_relay: current.use_relay ?? true,
   });
   if (!newConfig) {
     ctx.ui.notify("[remote-pi] Setup cancelled.", "info");
@@ -2868,17 +2720,14 @@ async function _cmdStart(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<voi
       return;
     }
     if (err instanceof PairedIdentityMissingError) {
-      // Issues #95/#69: this process can't reach the keyring that holds the
-      // paired identity (classically a `systemd --user` daemon vs. the desktop
-      // session that paired). Minting a fresh key here would make SelfRevoke
-      // wipe peers.json seconds later and take the phone offline, so storage
-      // refuses. Surface the actionable fix instead of failing silently.
+      // This process cannot reach the keyring that holds the paired identity.
+      // Minting a fresh key here would make SelfRevoke wipe peers.json shortly
+      // afterward, so storage refuses and surfaces the identity recovery path.
       ctx.ui.notify(
         "[remote-pi] Could not read this machine's identity, but devices are " +
         "already paired — refusing to generate a new one (that would revoke " +
         "them). This process likely cannot reach the same keyring as the " +
-        "session that paired (e.g. a systemd --user daemon). Give the service " +
-        "keyring access, or copy the paired keypair to ~/.pi/remote/identity.json " +
+        "session that paired. Copy the paired keypair to ~/.pi/remote/identity.json " +
         "(0600) so both contexts read the same identity.",
         "error",
       );
@@ -2907,26 +2756,19 @@ async function _cmdStart(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<voi
   const roomId = roomIdFor(cwd, sessionName);
 
   // Seed the current model from the SDK's resolved selection so room_meta
-  // carries it on connect. `model_select` only fires on an explicit set/cycle
-  // (NOT on settings load), so a headless daemon that just runs its default
-  // model never emits it — without this its room_meta would omit the model and
-  // the app shows "unknown". `getModel()` returns the session's resolved model
-  // in every mode (interactive + RPC daemon); turn_start hydrates it later if
-  // the SDK resolves the model lazily.
+  // carries it on connect. `model_select` only fires on explicit changes, so
+  // a headless RPC session using its configured default may never emit it.
+  // `getModel()` returns the resolved selection; turn_start hydrates it if the
+  // SDK resolves the model lazily.
   if (!_currentModel) {
     try {
       const c = ctx as Partial<ExtensionContext> & {
         model?: { name?: string; id?: string };
         getModel?: () => { name?: string; id?: string } | undefined;
       };
-      // Prefer the live getModel() / ctx.model — populated for an interactive
-      // Pi. For a HEADLESS DAEMON both are undefined at connect: the SDK only
-      // resolves `this.model` lazily at the first turn, and `model_select`
-      // never fires for a default-model session. So fall back to the CONFIGURED
-      // default (defaultProvider/defaultModel in <cwd>/.pi/settings.json) — the
-      // model the daemon will actually use. Without this an idle daemon (never
-      // prompted → no turn) would never report its model and the app shows
-      // "unknown". turn_start still hydrates a later override.
+      // Prefer the live getModel() / ctx.model. Some headless RPC contexts
+      // expose neither until the first turn, so fall back to the configured
+      // default in <cwd>/.pi/settings.json for an idle session.
       const live = c.getModel?.() ?? c.model;
       if (live) {
         _currentModel = live.name ?? live.id ?? undefined;
@@ -3454,545 +3296,6 @@ async function _cmdRelay(arg: string, ctx: ExtensionContext): Promise<void> {
   }
 }
 
-// ── Daemon registry commands (plan/26 Wave 1) ─────────────────────────────────
-
-/**
- * `/remote-pi create [<cwd>] [--name <name>]`
- *
- * Promotes a folder to a daemon entry in `~/.pi/remote/daemons.json`. The
- * cwd is **always normalized to an absolute realpath** before storage —
- * `~/Movies`, `./Movies`, `../foo/Movies` all collapse to a single
- * canonical entry. Relative paths resolve against the Pi process's
- * current working directory, not the slash-command's `ctx.cwd`.
- *
- * Side effects on the cwd's local config (`<cwd>/.pi/remote-pi/config.json`):
- *   - If the config doesn't exist: created with `auto_start_relay=true`
- *     (mandatory for daemons) and `agent_name` from `--name` if provided.
- *   - If the config already exists: left untouched. Re-running `create`
- *     on an existing daemon is idempotent at this layer; the registry
- *     itself rejects duplicate cwds.
- */
-async function _cmdCreate(arg: string, ctx: Pick<ExtensionContext, "ui">): Promise<void> {
-  // Parse `[cwd] [--name "value with spaces" | --name word]` in any order.
-  // The first non-flag token is the cwd; the rest of the line after
-  // `--name` (quoted or unquoted) is the display name.
-  const nameMatch = arg.match(/--name\s+"([^"]+)"|--name\s+(\S+)/);
-  const name = nameMatch ? (nameMatch[1] ?? nameMatch[2]) : undefined;
-  const cwdRaw = arg.replace(/--name\s+"[^"]+"|--name\s+\S+/, "").trim();
-  if (!cwdRaw) {
-    ctx.ui.notify(
-      "[remote-pi] Usage: /remote-pi create <absolute-or-relative-cwd> [--name \"Display name\"]",
-      "warning",
-    );
-    return;
-  }
-
-  let result: { id: string; cwd: string; name: string };
-  try {
-    result = addDaemon(cwdRaw, name);
-  } catch (err) {
-    ctx.ui.notify(`[remote-pi] create failed: ${String(err)}`, "error");
-    return;
-  }
-
-  // No local `.pi/remote-pi/config.json` is written anymore — the name lives
-  // in the registry and the supervisor injects the full config (agent_name,
-  // auto_start_relay true) via REMOTE_PI_DIRECT_CONFIG when it spawns the
-  // daemon. The cwd needs no init folder.
-
-  ctx.ui.notify(
-    `[remote-pi] Daemon registered: id=${result.id} name="${result.name}" cwd=${result.cwd}`,
-    "info",
-  );
-
-  // Auto-start: register alone used to leave the daemon idle until the next
-  // supervisor restart (the reported bug — `create` didn't run anything). Ask
-  // the supervisor to spawn THIS daemon now; it reads the name from the
-  // registry and injects the config via env. When the supervisor is offline we
-  // keep the
-  // registration and tell the user it'll boot on the next supervisor start.
-  try {
-    await callSupervisor({ op: "start", id: result.id });
-    ctx.ui.notify(`[remote-pi] Daemon started: id=${result.id}`, "info");
-  } catch (err) {
-    if (err instanceof SupervisorOfflineError) {
-      ctx.ui.notify(
-        `[remote-pi] Registered, but the supervisor is offline — not running yet. ` +
-        `Run \`remote-pi install\` (or start \`pi-supervisord\`); it auto-starts on the next supervisor boot.`,
-        "warning",
-      );
-      return;
-    }
-    ctx.ui.notify(`[remote-pi] Registered, but auto-start failed: ${String(err)}`, "error");
-  }
-}
-
-/**
- * `/remote-pi remove <id>`
- *
- * Unregisters a daemon by its 8-hex-char id (the same id printed by
- * `/remote-pi create` and `/remote-pi daemons`). The cwd's local config
- * stays on disk — re-creating later with the same cwd is a no-op
- * because the existing config wins.
- */
-async function _cmdRemove(arg: string, ctx: Pick<ExtensionContext, "ui">): Promise<void> {
-  const id = arg.trim();
-  if (!id) {
-    ctx.ui.notify(
-      "[remote-pi] Usage: /remote-pi remove <id>. Run /remote-pi daemons to see ids.",
-      "warning",
-    );
-    return;
-  }
-
-  // Prefer the supervisor's `unregister`: it STOPS the running child (SIGTERM →
-  // SIGKILL) BEFORE deleting the registry entry. Removing only the registry
-  // (the old behaviour) left an orphaned `pi --mode rpc` process running with
-  // nothing left to manage it — the reported bug. Fall back to a registry-only
-  // removal when the supervisor is offline (no managed process to stop anyway).
-  try {
-    const data = await callSupervisor({ op: "unregister", id });
-    if (!data.removed) {
-      const known = listDaemons().map((d) => d.id).join(", ") || "(none)";
-      ctx.ui.notify(`[remote-pi] No daemon with id "${id}". Known ids: ${known}`, "warning");
-      return;
-    }
-    ctx.ui.notify(
-      `[remote-pi] Daemon removed + process stopped: id=${id} cwd=${data.cwd}. ` +
-      `Local config at ${data.cwd}/.pi/remote-pi/config.json was kept.`,
-      "info",
-    );
-    return;
-  } catch (err) {
-    if (!(err instanceof SupervisorOfflineError)) {
-      ctx.ui.notify(`[remote-pi] remove failed: ${String(err)}`, "error");
-      return;
-    }
-    // Supervisor offline — fall through to registry-only removal below.
-  }
-
-  let result: { removed: boolean; cwd?: string };
-  try {
-    result = removeDaemon(id);
-  } catch (err) {
-    ctx.ui.notify(`[remote-pi] remove failed: ${String(err)}`, "error");
-    return;
-  }
-
-  if (!result.removed) {
-    const known = listDaemons().map((d) => d.id).join(", ") || "(none)";
-    ctx.ui.notify(`[remote-pi] No daemon with id "${id}". Known ids: ${known}`, "warning");
-    return;
-  }
-
-  ctx.ui.notify(
-    `[remote-pi] Daemon removed from registry: id=${id} cwd=${result.cwd}. ` +
-    `Supervisor was offline, so any running process was NOT stopped. Local config kept.`,
-    "warning",
-  );
-}
-
-// ── Fleet-ops commands (plan/26 W2) — talk to the supervisor over UDS ─────────
-//
-// Every command here is a thin wrapper around `callSupervisor(...)`. When
-// the supervisor isn't running we fall back to a friendly hint instead of
-// the raw error, so the user can't get stuck on "what's wrong?".
-
-function _notifyOffline(ctx: Pick<ExtensionContext, "ui">, err: SupervisorOfflineError): void {
-  ctx.ui.notify(`[remote-pi] ${err.message}`, "warning");
-}
-
-function _formatDaemonTable(daemons: DaemonInfo[]): string {
-  if (daemons.length === 0) return "(no daemons registered)";
-  const rows = daemons.map((d) => {
-    const uptime = d.uptime_s !== undefined ? `${d.uptime_s}s` : "—";
-    const pid = d.pid !== undefined ? String(d.pid) : "—";
-    const restarts = d.restart_count ?? 0;
-    return `  ${d.id}  ${d.state.padEnd(8)}  pid=${pid}  up=${uptime}  restarts=${restarts}  ${d.name}  ${d.cwd}`;
-  });
-  return rows.join("\n");
-}
-
-/**
- * `/remote-pi daemons` — registry + runtime state in one view. When the
- * supervisor is offline we still show registry-only output (state =
- * "stopped" everywhere), so the user can see what's configured even
- * before `install`.
- */
-async function _cmdDaemonsList(ctx: Pick<ExtensionContext, "ui">): Promise<void> {
-  if (!(await supervisorOnline())) {
-    const registry = listDaemons();
-    if (registry.length === 0) {
-      ctx.ui.notify("[remote-pi] No daemons registered. Run /remote-pi create <cwd>.", "info");
-      return;
-    }
-    const rows = registry.map((d) => {
-      const cfg = loadLocalConfig(d.cwd);
-      const name = cfg.agent_name ?? defaultAgentName(d.cwd);
-      return `  ${d.id}  ${name}  ${d.cwd}  (supervisor offline)`;
-    }).join("\n");
-    ctx.ui.notify(`[remote-pi] Daemons (registry only — run install to bring supervisor up):\n${rows}`, "info");
-    return;
-  }
-  try {
-    const data = await callSupervisor({ op: "list" });
-    ctx.ui.notify(`[remote-pi] Daemons:\n${_formatDaemonTable(data.daemons)}`, "info");
-  } catch (err) {
-    if (err instanceof SupervisorOfflineError) { _notifyOffline(ctx, err); return; }
-    ctx.ui.notify(`[remote-pi] daemons failed: ${String(err)}`, "error");
-  }
-}
-
-async function _cmdDaemonStatus(ctx: Pick<ExtensionContext, "ui">): Promise<void> {
-  try {
-    const data = await callSupervisor({ op: "status" });
-    ctx.ui.notify(`[remote-pi] Fleet status:\n${_formatDaemonTable(data.daemons)}`, "info");
-  } catch (err) {
-    if (err instanceof SupervisorOfflineError) { _notifyOffline(ctx, err); return; }
-    ctx.ui.notify(`[remote-pi] status failed: ${String(err)}`, "error");
-  }
-}
-
-async function _cmdDaemonStart(ctx: Pick<ExtensionContext, "ui">, id?: string): Promise<void> {
-  try {
-    if (id) {
-      const data = await callSupervisor({ op: "start", id });
-      ctx.ui.notify(
-        data.started
-          ? `[remote-pi] Started daemon ${id} (${data.state}).`
-          : `[remote-pi] Daemon ${id} already ${data.state}.`,
-        "info",
-      );
-      return;
-    }
-    const data = await callSupervisor({ op: "start_all" });
-    ctx.ui.notify(
-      `[remote-pi] Started ${data.started.length} daemon(s), ` +
-      `${data.already_running.length} already running.`,
-      "info",
-    );
-  } catch (err) {
-    if (err instanceof SupervisorOfflineError) { _notifyOffline(ctx, err); return; }
-    ctx.ui.notify(`[remote-pi] start failed: ${String(err)}`, "error");
-  }
-}
-
-async function _cmdDaemonStop(ctx: Pick<ExtensionContext, "ui">, id?: string): Promise<void> {
-  try {
-    if (id) {
-      const data = await callSupervisor({ op: "stop", id });
-      ctx.ui.notify(
-        data.stopped
-          ? `[remote-pi] Stopped daemon ${id}.`
-          : `[remote-pi] Daemon ${id} already ${data.state}.`,
-        "info",
-      );
-      return;
-    }
-    const data = await callSupervisor({ op: "stop_all" });
-    ctx.ui.notify(
-      `[remote-pi] Stopped ${data.stopped.length} daemon(s), ` +
-      `${data.already_stopped.length} already stopped.`,
-      "info",
-    );
-  } catch (err) {
-    if (err instanceof SupervisorOfflineError) { _notifyOffline(ctx, err); return; }
-    ctx.ui.notify(`[remote-pi] stop failed: ${String(err)}`, "error");
-  }
-}
-
-async function _cmdDaemonRestart(ctx: Pick<ExtensionContext, "ui">, id?: string): Promise<void> {
-  try {
-    if (id) {
-      const data = await callSupervisor({ op: "restart", id });
-      ctx.ui.notify(`[remote-pi] Restarted daemon ${id} (${data.state}).`, "info");
-      return;
-    }
-    const data = await callSupervisor({ op: "restart_all" });
-    ctx.ui.notify(`[remote-pi] Restarted ${data.restarted.length} daemon(s).`, "info");
-  } catch (err) {
-    if (err instanceof SupervisorOfflineError) { _notifyOffline(ctx, err); return; }
-    ctx.ui.notify(`[remote-pi] restart failed: ${String(err)}`, "error");
-  }
-}
-
-/**
- * `/remote-pi daemon send <id> "<text>"` — injects a prompt into a
- * running daemon via its RPC stdin. The agent processes the prompt as
- * if a user typed it; output flows back via the relay/mesh, not here.
- *
- * Fire-and-forget at this layer — the CLI just confirms delivery.
- */
-async function _cmdDaemonSend(arg: string, ctx: Pick<ExtensionContext, "ui">): Promise<void> {
-  // Parse `<id> <text...>` — id is the first token, rest is the prompt.
-  // The text may be quoted; if so, strip the outer quotes. Otherwise
-  // take the entire remainder verbatim.
-  const m = arg.match(/^(\S+)\s+(?:"([^"]*)"|(.*))$/);
-  if (!m) {
-    ctx.ui.notify(
-      "[remote-pi] Usage: /remote-pi daemon send <id> \"<prompt text>\"",
-      "warning",
-    );
-    return;
-  }
-  const id = m[1]!;
-  const text = (m[2] ?? m[3] ?? "").trim();
-  if (!text) {
-    ctx.ui.notify("[remote-pi] daemon send: prompt text is empty.", "warning");
-    return;
-  }
-  try {
-    const data = await callSupervisor({ op: "send", id, text });
-    if (data.delivered) {
-      ctx.ui.notify(`[remote-pi] Sent to ${id}: ${text.slice(0, 60)}${text.length > 60 ? "…" : ""}`, "info");
-    } else {
-      ctx.ui.notify(`[remote-pi] daemon ${id} did not accept the prompt (not running?)`, "warning");
-    }
-  } catch (err) {
-    if (err instanceof SupervisorOfflineError) { _notifyOffline(ctx, err); return; }
-    ctx.ui.notify(`[remote-pi] daemon send failed: ${String(err)}`, "error");
-  }
-}
-
-// ── Cron — scheduled prompts for daemons (plan/39) ──────────────────────────
-
-/** Splits an arg string into tokens, honoring double-quoted groups. */
-function _tokenizeArgs(s: string): string[] {
-  const out: string[] = [];
-  const re = /"([^"]*)"|(\S+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(s)) !== null) out.push(m[1] !== undefined ? m[1] : m[2]!);
-  return out;
-}
-
-/**
- * `/remote-pi cron <add|list|remove|enable|disable|run|log>` — schedules
- * recurring prompts to daemons via the supervisor. All subcommands require the
- * supervisor running (offline → friendly notice, not a crash).
- */
-async function _cmdCron(arg: string, ctx: Pick<ExtensionContext, "ui">): Promise<void> {
-  const trimmed = arg.trim();
-  const sp = trimmed.indexOf(" ");
-  const sub = (sp === -1 ? trimmed : trimmed.slice(0, sp)).toLowerCase();
-  const rest = sp === -1 ? "" : trimmed.slice(sp + 1).trim();
-  try {
-    switch (sub) {
-      case "":
-      case "list":    return await _cronList(ctx);
-      case "add":     return await _cronAdd(rest, ctx);
-      case "remove":
-      case "rm":      return await _cronMutate({ op: "cron_remove", job_id: rest.trim() }, rest.trim(), ctx);
-      case "enable":  return await _cronMutate({ op: "cron_enable", job_id: rest.trim(), enabled: true }, rest.trim(), ctx);
-      case "disable": return await _cronMutate({ op: "cron_enable", job_id: rest.trim(), enabled: false }, rest.trim(), ctx);
-      case "run":     return await _cronRun(rest.trim(), ctx);
-      case "log":     return await _cronLog(rest, ctx);
-      default:
-        ctx.ui.notify("[remote-pi] Usage: /remote-pi cron <add|list|remove|enable|disable|run|log>", "warning");
-    }
-  } catch (err) {
-    if (err instanceof SupervisorOfflineError) {
-      ctx.ui.notify(
-        "[remote-pi] Cron needs the supervisor running. Run `remote-pi install` " +
-        "(or start `pi-supervisord`).",
-        "warning",
-      );
-      return;
-    }
-    ctx.ui.notify(`[remote-pi] cron ${sub || "list"} failed: ${String(err)}`, "error");
-  }
-}
-
-async function _cronAdd(rest: string, ctx: Pick<ExtensionContext, "ui">): Promise<void> {
-  const toks = _tokenizeArgs(rest);
-  let tz: string | undefined;
-  let wake = false;
-  let skipBusy = true;
-  let catchup = false;
-  const pos: string[] = [];
-  for (let i = 0; i < toks.length; i++) {
-    const t = toks[i]!;
-    if (t === "--wake") wake = true;
-    else if (t === "--no-skip-busy") skipBusy = false;
-    else if (t === "--catchup") catchup = true;
-    else if (t === "--tz") tz = toks[++i];
-    else pos.push(t);
-  }
-  const [daemonId, schedule, prompt] = pos;
-  if (!daemonId || !schedule || !prompt) {
-    ctx.ui.notify(
-      '[remote-pi] Usage: /remote-pi cron add <daemonId> "<cron-expr>" "<prompt>" ' +
-      "[--tz Area/City] [--wake] [--no-skip-busy] [--catchup]",
-      "warning",
-    );
-    return;
-  }
-  const req: Extract<ControlRequest, { op: "cron_add" }> = {
-    op: "cron_add", daemon_id: daemonId, schedule, prompt,
-  };
-  if (tz) req.tz = tz;
-  if (wake) req.wake = true;
-  if (!skipBusy) req.skip_if_busy = false;
-  if (catchup) req.catchup = true;
-  const data = await callSupervisor(req);
-  ctx.ui.notify(
-    `[remote-pi] Cron ${data.job.id} added → daemon ${daemonId}: "${schedule}"` +
-    `${tz ? ` (${tz})` : ""}. Next run: ${data.job.next_run ?? "?"}`,
-    "info",
-  );
-}
-
-async function _cronList(ctx: Pick<ExtensionContext, "ui">): Promise<void> {
-  const data = await callSupervisor({ op: "cron_list" });
-  if (data.jobs.length === 0) {
-    ctx.ui.notify("[remote-pi] No cron jobs.", "info");
-    return;
-  }
-  const lines = data.jobs.map((j) =>
-    `${j.enabled ? "✓" : "✗"} ${j.id}  "${j.schedule}"${j.tz ? ` (${j.tz})` : ""}  → ${j.daemon_id}  ` +
-    `next:${j.next_run ?? "?"}  last:${j.last_status ?? "—"}${j.last_run ? `@${j.last_run}` : ""}`,
-  );
-  ctx.ui.notify(`[remote-pi] Cron jobs (${data.jobs.length}):\n${lines.join("\n")}`, "info");
-}
-
-async function _cronMutate(
-  req: Extract<ControlRequest, { op: "cron_remove" | "cron_enable" }>,
-  jobId: string,
-  ctx: Pick<ExtensionContext, "ui">,
-): Promise<void> {
-  if (!jobId) {
-    ctx.ui.notify(`[remote-pi] Usage: /remote-pi cron ${req.op === "cron_remove" ? "remove" : "enable|disable"} <jobId>`, "warning");
-    return;
-  }
-  if (req.op === "cron_remove") {
-    const data = await callSupervisor(req);
-    ctx.ui.notify(data.removed ? `[remote-pi] Cron ${jobId} removed.` : `[remote-pi] No cron job ${jobId}.`, data.removed ? "info" : "warning");
-  } else {
-    const data = await callSupervisor(req);
-    ctx.ui.notify(
-      data.updated ? `[remote-pi] Cron ${jobId} ${data.enabled ? "enabled" : "disabled"}.` : `[remote-pi] No cron job ${jobId}.`,
-      data.updated ? "info" : "warning",
-    );
-  }
-}
-
-async function _cronRun(jobId: string, ctx: Pick<ExtensionContext, "ui">): Promise<void> {
-  if (!jobId) {
-    ctx.ui.notify("[remote-pi] Usage: /remote-pi cron run <jobId>", "warning");
-    return;
-  }
-  const data = await callSupervisor({ op: "cron_run", job_id: jobId });
-  ctx.ui.notify(`[remote-pi] Cron ${jobId} fired now → ${data.result}`, "info");
-}
-
-async function _cronLog(rest: string, ctx: Pick<ExtensionContext, "ui">): Promise<void> {
-  const toks = _tokenizeArgs(rest);
-  let jobId: string | undefined;
-  let tail = 20;
-  for (let i = 0; i < toks.length; i++) {
-    const t = toks[i]!;
-    if (t === "--tail") { const n = Number(toks[++i]); if (Number.isFinite(n)) tail = n; }
-    else if (!t.startsWith("--")) jobId = t;
-  }
-  const req: Extract<ControlRequest, { op: "cron_log" }> = { op: "cron_log", tail };
-  if (jobId) req.job_id = jobId;
-  const data = await callSupervisor(req);
-  if (data.entries.length === 0) {
-    ctx.ui.notify("[remote-pi] No cron log entries.", "info");
-    return;
-  }
-  const lines = data.entries.map((e) =>
-    `${new Date(e.ts).toISOString()}  ${e.fired ? "▶" : "∅"} ${e.result}  ${e.job_id} → ${e.daemon_id}  ${e.prompt_preview}`,
-  );
-  ctx.ui.notify(`[remote-pi] Cron log (last ${data.entries.length}):\n${lines.join("\n")}`, "info");
-}
-
-// ── Install/uninstall the supervisor service (plan/26 W3) ────────────────────
-//
-// Installs `pi-supervisord` as a user-level system service (systemd
-// `--user` unit on Linux, launchd LaunchAgent on macOS). Once installed:
-//   - Supervisor starts at login + survives reboots.
-//   - `remote-pi daemon start/stop/send/...` work without manually
-//     spawning the supervisor.
-// Uninstall is the inverse — leaves the registry (`daemons.json`) intact,
-// so re-installing later picks up where you left off.
-
-/**
- * `linkCli` controls whether we symlink `remote-pi` + `pi-supervisord`
- * into `~/.local/bin/`. The slash-command path passes `true` (user is
- * inside Pi's TUI — they installed via `pi install npm:remote-pi` and
- * need us to expose the CLI for them). The standalone-CLI path passes
- * `false` because the user is already running our binary from PATH (they
- * did `npm install -g remote-pi`), so re-linking would point their
- * `remote-pi` at the Pi-extension copy and diverge on upgrades.
- */
-/** Returns true on success, false when install failed (so the standalone CLI
- *  can exit non-zero — e.g. the Cockpit / CI detect failure by exit code).
- *  We do NOT process.exit here: this also runs inside the Pi TUI, where exiting
- *  would kill the session. */
-function _cmdInstall(ctx: Pick<ExtensionContext, "ui">, opts: { linkCli?: boolean } = {}): boolean {
-  const linkCli = opts.linkCli ?? false;
-  try {
-    const result = installService();
-    const sections = [
-      `[remote-pi] Supervisor service installed (${result.platform}).`,
-      `  Unit: ${result.unitPath}`,
-      `  Steps:\n${result.log.map((l) => "    " + l).join("\n")}`,
-    ];
-    if (linkCli) {
-      const link = linkCliBinaries();
-      sections.push(
-        `  CLI bins linked into ${link.binDir}:`,
-        link.links.map((l) => `    ${l.name} → ${l.target}`).join("\n"),
-        `  Steps:\n${link.log.map((l) => "    " + l).join("\n")}`,
-      );
-      if (!link.onPath) {
-        if (process.platform === "win32") {
-          sections.push(
-            `  ⚠ ${link.binDir} was just added to your user PATH (it wasn't there yet).`,
-            `    Open a NEW terminal and run \`remote-pi daemons\` to verify.`,
-          );
-        } else {
-          sections.push(
-            `  ⚠ ${link.binDir} is not on $PATH yet. Add this line to ~/.zshrc / ~/.bashrc:`,
-            `      export PATH="$HOME/.local/bin:$PATH"`,
-            `    Then open a new terminal and run \`remote-pi daemons\` to verify.`,
-          );
-        }
-      }
-    }
-    ctx.ui.notify(sections.join("\n"), "info");
-    return true;
-  } catch (err) {
-    ctx.ui.notify(`[remote-pi] install failed: ${String(err)}`, "error");
-    return false;
-  }
-}
-
-function _cmdUninstall(ctx: Pick<ExtensionContext, "ui">, opts: { linkCli?: boolean } = {}): void {
-  const linkCli = opts.linkCli ?? false;
-  try {
-    const result = uninstallService();
-    const sections = [
-      `[remote-pi] Supervisor service uninstalled (${result.platform}).`,
-      `  Unit: ${result.unitPath} (${result.removed ? "removed" : "not present"})`,
-      `  Steps:\n${result.log.map((l) => "    " + l).join("\n")}`,
-      `  Note: daemons registry (~/.pi/remote/daemons.json) kept — re-install restores everything.`,
-    ];
-    if (linkCli) {
-      const unlink = unlinkCliBinaries();
-      sections.push(
-        `  CLI bins cleanup (${unlink.binDir}):`,
-        unlink.removed
-          .map((r) => `    ${r.name} (${r.existed ? "removed" : "not present"})`)
-          .join("\n"),
-      );
-    }
-    ctx.ui.notify(sections.join("\n"), "info");
-  } catch (err) {
-    ctx.ui.notify(`[remote-pi] uninstall failed: ${String(err)}`, "error");
-  }
-}
-
 // ── Agent-network commands (plano 19) ─────────────────────────────────────────
 
 function _resolveExtensionDir(): string {
@@ -4044,8 +3347,7 @@ function _deployAgentNetworkSkill(): void {
  *
  *   1. `_pi` not bound yet (activation race / mesh joined before the session
  *      attached): the old code did `if (!_pi) return`, dropping the message
- *      with no trace. We log it (the daemon forwards child stderr to its log
- *      with a cwd prefix, so it's visible in `journalctl`).
+ *      with no trace. We log it so the RPC host can surface the failure.
  *   2. A *synchronous* throw from `sendUserMessage` (e.g. malformed content):
  *      the old fire-and-forget call let it propagate out of the `onMessage`
  *      callback, which could wedge the read loop and blackout every later
@@ -4215,7 +3517,6 @@ async function _cmdJoin(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<void
     name: agentName,
     cwd: canonCwd,
     auditPath: audit,
-    takeoverExisting: process.env["REMOTE_PI_DAEMON"] === "1",
   });
 
   peer.onMessage((env) => {
@@ -4517,25 +3818,7 @@ export function _routeClientMessageFrom(
       break;
     case "session_new": {
       const actionCtx = _lastCtx as ActionCtx | null;
-      const daemonMode = process.env["REMOTE_PI_DAEMON"] === "1";
-      // Fresh Pi session via the supervisor: ack, clear remote-pi's mirror, then
-      // exit with the private code so the supervisor relaunches without
-      // --continue → a genuinely fresh session. Used when there's NO command ctx
-      // AND as recovery when the captured _lastCtx has gone STALE after an
-      // external session replacement (compact, a /new typed in the TUI,
-      // reload/resume). Reusing a stale ctx throws "stale after session
-      // replacement", which previously surfaced to the app as a hard failure
-      // ("session_new failed") and left New Context wedged.
-      const restartFresh = () => {
-        sender.send({ type: "action_ok", in_reply_to: msg.id, action: "session_new" });
-        _resetSessionForNew(msg.id);
-        setTimeout(() => process.exit(EXIT_DAEMON_FRESH_SESSION), 100);
-      };
       if (!actionCtx?.newSession) {
-        if (daemonMode) {
-          restartFresh();
-          break;
-        }
         sender.send({
           type: "action_error",
           in_reply_to: msg.id,
@@ -4544,12 +3827,6 @@ export function _routeClientMessageFrom(
         });
         break;
       }
-      // Fast path: drive newSession in-process on the (hopefully fresh) command
-      // ctx, re-capturing the replacement ctx via withSession so later command
-      // ops target the current session. If the ctx turns out stale, recover by
-      // restarting fresh (daemon) instead of failing the action.
-      // Capture the method past the guard above: TS drops the `!actionCtx?.newSession`
-      // narrowing inside the async closure, so bind it to a local const first.
       const newSession = actionCtx.newSession;
       void (async () => {
         try {
@@ -4571,11 +3848,6 @@ export function _routeClientMessageFrom(
           _resetSessionForNew(msg.id);
         } catch (e) {
           const emsg = String((e as Error)?.message ?? e ?? "");
-          const stale = /stale|session replacement or reload/i.test(emsg);
-          if (daemonMode && stale) {
-            restartFresh();
-            return;
-          }
           sender.send({
             type: "action_error",
             in_reply_to: msg.id,
@@ -4999,64 +4271,6 @@ export function _mapAgentMessagesToEvents(
   return events;
 }
 
-// ── Standalone CLI ────────────────────────────────────────────────────────────
-
-/**
- * `remote-pi restart-supervisor` — restarts the `pi-supervisord` PROCESS
- * (not the daemons). The supervisor is a long-running Node process with no
- * hot-reload, so after a `dist` rebuild the old code keeps running until the
- * process is restarted. The Cockpit "Restart supervisor" button shells out to
- * this; the OS-specific restart lives here so the app stays cross-platform.
- *
- * Restarting the supervisor re-spawns every daemon as a side effect. Exits 0
- * on success, non-zero on failure (the Cockpit detects failure by exit code).
- */
-/** One step of a restart sequence. `ignoreFailure` steps (e.g. `schtasks /End`
- *  when the task isn't running) don't abort the sequence. */
-export interface RestartStep { cmd: string; args: string[]; ignoreFailure?: boolean }
-
-/** Pure: the OS command sequence that restarts the supervisor service, or null
- *  when the platform isn't supported. Most platforms are 1 step; Windows is 2
- *  (`schtasks /End` then `/Run`). Exported for tests. */
-export function _restartSupervisorCommand(
-  platform: NodeJS.Platform,
-  uid: number,
-): RestartStep[] | null {
-  if (platform === "darwin") return [{ cmd: "launchctl", args: ["kickstart", "-k", `gui/${uid}/${LAUNCHD_LABEL}`] }];
-  if (platform === "linux") return [{ cmd: "systemctl", args: ["--user", "restart", SYSTEMD_UNIT] }];
-  if (platform === "win32") return [
-    { cmd: "schtasks", args: ["/End", "/TN", WINDOWS_TASK_NAME], ignoreFailure: true },
-    { cmd: "schtasks", args: ["/Run", "/TN", WINDOWS_TASK_NAME] },
-  ];
-  return null;
-}
-
-function _restartSupervisor(): void {
-  const uid = process.getuid?.() ?? 0;
-  const steps = _restartSupervisorCommand(process.platform, uid);
-  if (!steps) {
-    console.error(
-      `[remote-pi] restart-supervisor is not supported on '${process.platform}' yet. ` +
-      "Restart pi-supervisord manually.",
-    );
-    process.exit(1);
-  }
-  for (const step of steps) {
-    const r = spawnSync(step.cmd, step.args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
-    if (r.error) {
-      if (step.ignoreFailure) continue;
-      console.error(`[remote-pi] restart-supervisor failed: ${step.cmd} not runnable (${r.error.message}). Is the service installed? Run \`remote-pi install\`.`);
-      process.exit(1);
-    }
-    if (r.status !== 0 && !step.ignoreFailure) {
-      const detail = (r.stderr || r.stdout || "").trim();
-      console.error(`[remote-pi] restart-supervisor failed (${step.cmd} exited ${r.status})${detail ? `: ${detail}` : ""}.`);
-      process.exit(r.status === null ? 1 : r.status);
-    }
-  }
-  console.log("[remote-pi] Supervisor restarted.");
-}
-
 function _isDirectRun(): boolean {
   try {
     return fileURLToPath(import.meta.url) === realpathSync(process.argv[1] ?? "");
@@ -5077,7 +4291,7 @@ function _isDirectRun(): boolean {
  * no phantom peer flashes in anyone's roster, local or cross-PC.
  *
  * Resolves null when no broker is reachable (connection refused / no socket
- * file — i.e. no Pi or daemon is leading the mesh on this machine), or on
+ * file — i.e. no Pi process is leading the mesh on this machine), or on
  * timeout, so the caller can print an "offline" message instead of an empty
  * roster.
  */
@@ -5165,47 +4379,6 @@ if (_isDirectRun()) {
       saveConfig({ relay: raw });
       console.log(`Relay set to ${raw}`);
     }
-  } else if (subcmd === "create") {
-    // Standalone: `remote-pi create <cwd> [--name "X"]`. The shell already
-    // split the args and stripped the outer quotes, so an arg like
-    // `Tmp Agent` arrives as a single element with embedded space. Re-add
-    // quotes around any arg containing whitespace so the regex-based
-    // parser (shared with the slash-command path) sees the same shape
-    // as it would from a Pi interactive prompt.
-    const joined = cliArgs.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" ");
-    await _cmdCreate(joined, {
-      ui: { notify: (msg: string) => console.log(msg) } as unknown as ExtensionContext["ui"],
-    });
-  } else if (subcmd === "remove") {
-    const id = (cliArgs[0] ?? "").trim();
-    await _cmdRemove(id, {
-      ui: { notify: (msg: string) => console.log(msg) } as unknown as ExtensionContext["ui"],
-    });
-  } else if (subcmd === "daemons") {
-    // Mirror the slash handler: ask the supervisor when reachable,
-    // fall back to registry-only when not.
-    const stubCtx = { ui: { notify: (msg: string) => console.log(msg) } as unknown as ExtensionContext["ui"] };
-    await _cmdDaemonsList(stubCtx);
-  } else if (subcmd === "daemon") {
-    // `remote-pi daemon <op> [args]`. Reuse the fleet-ops handlers — they
-    // already accept a minimal ctx with `notify`.
-    const op = cliArgs[0] ?? "";
-    const rest = cliArgs.slice(1).map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" ");
-    const stubCtx = { ui: { notify: (msg: string) => console.log(msg) } as unknown as ExtensionContext["ui"] };
-    if      (op === "start")   { await _cmdDaemonStart(stubCtx, cliArgs[1]); }
-    else if (op === "stop")    { await _cmdDaemonStop(stubCtx, cliArgs[1]); }
-    else if (op === "restart") { await _cmdDaemonRestart(stubCtx, cliArgs[1]); }
-    else if (op === "status")  { await _cmdDaemonStatus(stubCtx); }
-    else if (op === "send")    { await _cmdDaemonSend(rest, stubCtx); }
-    else {
-      console.log("Usage: remote-pi daemon <start|stop|restart [<id>]|status|send <id> \"<text>\">");
-    }
-  } else if (subcmd === "cron") {
-    // `remote-pi cron <op> [args]`. Re-quote args with spaces so the shared
-    // parser sees the same shape as a Pi slash prompt.
-    const joined = cliArgs.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" ");
-    const stubCtx = { ui: { notify: (msg: string) => console.log(msg) } as unknown as ExtensionContext["ui"] };
-    await _cmdCron(joined, stubCtx);
   } else if (subcmd === "peers") {
     // Read-only roster of the local + cross-PC mesh. Unlike `devices` (which
     // reads paired phones from peers.json), the mesh roster lives only in the
@@ -5218,51 +4391,9 @@ if (_isDirectRun()) {
     } else {
       console.log(`[remote-pi] peers:\n${formatPeerInventory(peers)}`);
     }
-  } else if (subcmd === "claude") {
-    await _cmdClaudeCli(cliArgs);
-  } else if (subcmd === "install") {
-    // CLI mode = user installed via `npm install -g remote-pi`, so the
-    // `remote-pi` / `pi-supervisord` bins are already on $PATH via npm's
-    // global prefix. Explicit `linkCli: false` so we never stomp those
-    // with symlinks pointing at a parallel Pi-extension install.
-    const stubCtx = { ui: { notify: (msg: string) => console.log(msg) } as unknown as ExtensionContext["ui"] };
-    // Propagate failure as a non-zero exit so callers (Cockpit / CI) detect it
-    // — installService throws on a failed schtasks/launchctl/systemctl step.
-    if (!_cmdInstall(stubCtx, { linkCli: false })) process.exit(1);
-  } else if (subcmd === "uninstall") {
-    const stubCtx = { ui: { notify: (msg: string) => console.log(msg) } as unknown as ExtensionContext["ui"] };
-    // `linkCli: true` even from the CLI: unlinking is ALWAYS safe and must run
-    // regardless of how install ran. `unlinkCliBinaries` only removes OUR
-    // reserved symlinks (`remote-pi` / `pi-supervisord`) under `~/.local/bin`;
-    // npm-global bins live in a different prefix and are never touched. So a
-    // user who installed via the TUI (`/remote-pi install`, which links) and
-    // uninstalls from a shell still gets the links cleaned up — the asymmetry
-    // that left an orphaned `~/.local/bin/remote-pi` behind.
-    _cmdUninstall(stubCtx, { linkCli: true });
-  } else if (subcmd === "restart-supervisor") {
-    _restartSupervisor();
   } else {
     console.log([
       "Usage: remote-pi <command>",
-      "",
-      "Daemon registry:",
-      "  create <cwd> [--name \"Name\"]   Register a folder as a daemon",
-      "  remove <id>                     Unregister a daemon",
-      "  daemons                         List registered daemons",
-      "",
-      "Fleet control:",
-      "  daemon start [<id>]             Start all daemons, or one by id",
-      "  daemon stop [<id>]              Stop all daemons, or one by id",
-      "  daemon restart [<id>]           Restart all daemons, or one by id",
-      "  daemon status                   Show pid / uptime / restarts",
-      "  daemon send <id> \"<text>\"       Send a prompt to a daemon",
-      "  cron add <id> \"<expr>\" \"<txt>\"  Schedule a recurring prompt (≥60s; --tz, --wake)",
-      "  cron list|run|remove|log        Manage scheduled prompts (needs the supervisor)",
-      "",
-      "Service:",
-      "  install                         Install pi-supervisord as a system service",
-      "  uninstall                       Remove the system service",
-      "  restart-supervisor              Restart the pi-supervisord process",
       "",
       "Devices:",
       "  devices                         List paired phones (peers.json)",
@@ -5273,149 +4404,6 @@ if (_isDirectRun()) {
       "",
       "Agent mesh:",
       "  peers                           List agents on the local + cross-PC mesh",
-      "  claude [cwd]                    Start Claude Code connected to the agent mesh",
     ].join("\n"));
-  }
-}
-
-// ── `remote-pi claude` — launch Claude Code connected to the mesh ─────────────
-
-/**
- * Resolve the packaged agent-network skill path
- * (`<pkgRoot>/skills/agent-network/SKILL.md`). Single source of truth shared
- * by both runtimes: Pi discovers it via `resources_discover`, and the Claude
- * launcher injects it as a system prompt (see `_cmdClaudeCli`). Returns null
- * if the file is missing (e.g. running before `pnpm build`).
- */
-function _agentNetworkSkillPath(): string | null {
-  const here = fileURLToPath(import.meta.url);            // dist/index.js (or src/index.ts via tsx)
-  const pkgRoot = dirname(dirname(here));                 // package root (dist → ..; src → ..)
-  const skill = join(pkgRoot, "skills", "agent-network", "SKILL.md");
-  return existsSync(skill) ? skill : null;
-}
-
-async function _cmdClaudeCli(args: string[]): Promise<void> {
-  // Contract: `remote-pi claude [cwd] [claude-flags...]`. The optional cwd is
-  // ONLY the leading positional (first token, not a flag); everything after it
-  // is forwarded verbatim to the `claude` binary (e.g. `--resume`, `-c`,
-  // `-p "prompt"`). Restricting cwd to the leading token avoids mistaking a
-  // flag's value (e.g. the id in `--resume <id>`) for the cwd.
-  const hasCwdArg = args.length > 0 && !args[0]!.startsWith("-");
-  const targetCwd = hasCwdArg ? args[0]! : process.cwd();
-  const passthroughArgs = hasCwdArg ? args.slice(1) : args;
-
-  // Wizard when no local config exists
-  if (!localConfigExists(targetCwd)) {
-    const suggested = defaultAgentName(targetCwd);
-    process.stdout.write(`\n[remote-pi] No config found for ${targetCwd}\n`);
-    process.stdout.write("Let's set up this agent.\n\n");
-
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    const agentName: string = await new Promise((res) =>
-      rl.question(`Agent name [${suggested}]: `, (ans) => { rl.close(); res(ans.trim() || suggested); }),
-    );
-
-    saveLocalConfig(targetCwd, { agent_name: agentName, auto_start_relay: true });
-    process.stdout.write(`[remote-pi] Config saved: agent="${agentName}"\n\n`);
-  }
-
-  // Resolve mesh server script path (dist/mcp/mesh_server.js)
-  const here = fileURLToPath(import.meta.url);
-  const distRoot = dirname(here);
-  const meshServerPath = resolve(distRoot, "mcp/mesh_server.js");
-
-  if (!existsSync(meshServerPath)) {
-    console.log(`[remote-pi] mesh server not found at ${meshServerPath}. Run pnpm build first.`);
-    process.exit(1);
-  }
-
-  const absCwd = resolve(targetCwd);
-  const SERVER_NAME = "remote-pi-mesh";
-
-  // The mesh MCP must be visible ONLY inside a `remote-pi claude` session — a
-  // plain `claude` in the same repo must NOT inherit it (otherwise every
-  // ordinary session silently joins the mesh as a stray agent).
-  //
-  // Older builds registered the server with `claude mcp add -s local`. That
-  // scope lives in `~/.claude.json` keyed by the **git repo root** and is
-  // inherited by EVERY claude session under that root — which is exactly the
-  // leak we're closing. So we no longer write any persistent scope; we load
-  // the server through an ephemeral `--mcp-config <tmpfile>` passed on the
-  // launch command line (see below). That config is session-only: it is never
-  // recorded in any scope `claude mcp list` enumerates, so a normal `claude`
-  // sees nothing.
-  //
-  // Migration: best-effort scrub of the stale `-s local` entry that prior
-  // versions left behind (and that is the source of the inherited-mesh bug).
-  // Idempotent — a no-op (non-zero, ignored) when the entry is already gone.
-  spawnSync("claude", ["mcp", "remove", SERVER_NAME, "-s", "local"], {
-    cwd: absCwd, stdio: "ignore", shell: false,
-  });
-
-  // Ephemeral MCP config consumed by `--mcp-config` below. We do NOT bake a
-  // `cwd` into it: the server resolves its folder from its own `process.cwd()`,
-  // which Claude sets to the directory the session was launched in (verified
-  // empirically — NOT the git root, NOT CLAUDE_PROJECT_DIR). We spawn claude
-  // with `cwd: absCwd`, the MCP child inherits it, so the server self-identifies
-  // as the right agent without leaking that path to any other session.
-  // Unique per pid so concurrent `remote-pi claude` launches don't collide.
-  const mcpConfigPath = join(tmpdir(), `remote-pi-mesh-mcp-${process.pid}.json`);
-  writeFileSync(mcpConfigPath, JSON.stringify({
-    mcpServers: {
-      [SERVER_NAME]: { command: process.execPath, args: [meshServerPath] },
-    },
-  }));
-
-  // Inject the agent-network protocol as a system prompt instead of deploying a
-  // skill file into ~/.claude. Anyone running `remote-pi claude` is here to use
-  // the mesh, so load the protocol unconditionally — no lazy skill gating, no
-  // global skills-dir pollution, and the packaged file is the single source of
-  // truth shared with the Pi runtime. Skipped only if the file is missing.
-  const skillPath = _agentNetworkSkillPath();
-
-  // Launch flags:
-  //   --mcp-config <tmpfile>                       — load the mesh server for
-  //       THIS session only (never a persistent scope). We intentionally omit
-  //       `--strict-mcp-config` so the user's own persistent MCP servers stay
-  //       available alongside the mesh.
-  //   --dangerously-load-development-channels TAG  — enable claude/channel push
-  //       for our local (non-allowlisted) server, so incoming mesh messages
-  //       wake Claude instead of waiting for a get_messages poll. Entries must
-  //       be tagged: `server:<name>` for a manually configured MCP server
-  //       (`plugin:<name>@<marketplace>` is the plugin form). Shows a one-time
-  //       confirmation dialog at startup. Works against the `--mcp-config`
-  //       server in current Claude Code; if a build ever fails to match it, the
-  //       per-turn `get_messages` poll (mandated by the mesh protocol) still
-  //       delivers — we lose the wake, not the messages.
-  //   --dangerously-skip-permissions               — auto-approve tool calls
-  //   --append-system-prompt-file=<skill>           — load the mesh protocol
-  // `--append-system-prompt-file` uses the glued `--flag=value` form (a SINGLE
-  // argv token) on purpose: tools that restore a session by capturing and
-  // replaying the live process's argv (e.g. cmux) drop the TRAILING token,
-  // which here was the skill path — leaving a dangling `--append-system-prompt-file`
-  // → `claude` aborts with "argument missing" and the session never comes back.
-  // As one token, the worst case is the whole flag being dropped: claude still
-  // starts (just without the injected protocol), which is recoverable instead
-  // of fatal. (The other flags stay separate pairs — never last, so unaffected,
-  // and we don't risk a parser that may not accept `=`.)
-  // Any extra args the user passed (e.g. `--resume`, `-c`) are appended last so
-  // they reach the claude binary; ours come first as sensible defaults.
-  try {
-    spawnSync("claude", [
-      "--mcp-config", mcpConfigPath,
-      "--dangerously-load-development-channels", `server:${SERVER_NAME}`,
-      "--dangerously-skip-permissions",
-      ...(skillPath ? [`--append-system-prompt-file=${skillPath}`] : []),
-      ...passthroughArgs,
-    ], {
-      cwd: absCwd,
-      stdio: "inherit",
-      shell: false,
-    });
-  } finally {
-    // Session over — drop the ephemeral config so it never lingers as a stray
-    // file. spawnSync blocks until claude exits, so claude has long since read
-    // it. Best-effort: ignore if already gone.
-    try { unlinkSync(mcpConfigPath); } catch { /* already removed */ }
   }
 }

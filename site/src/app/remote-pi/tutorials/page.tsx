@@ -6,7 +6,7 @@ import { RevealController } from "@/components/landing/reveal-controller";
 export const metadata: Metadata = {
   title: "Tutorials",
   description:
-    "Hands-on guides for Remote Pi: get started with the app, run a local mesh, route across PCs, and keep an agent alive 24/7.",
+    "Hands-on guides for Remote Pi: get started with the app, run a local mesh, and route across PCs.",
 };
 
 type Step = {
@@ -35,27 +35,10 @@ const STEPS: Step[] = [
   },
   {
     n: "3",
-    tag: "03 / 04",
+    tag: "03 / 03",
     title: "Remote mesh",
     href: "/remote-pi/tutorials/mesh-remote",
     desc: "Route messages between agents on different PCs through the relay.",
-  },
-  {
-    n: "4",
-    tag: "04 / 04",
-    title: "Daemon mode",
-    href: "/remote-pi/tutorials/daemon",
-    desc: "Keep an agent alive 24/7 with the supervisor, then manage the fleet.",
-  },
-];
-
-const EXTRAS: Step[] = [
-  {
-    star: true,
-    tag: "extra",
-    title: "Claude in the mesh",
-    href: "/remote-pi/tutorials/claude-mesh",
-    desc: "Put Claude Code on the agent mesh next to Pi — advanced, terminal-only (not in the app yet).",
   },
 ];
 
@@ -84,8 +67,8 @@ export default function TutorialsIndexPage() {
             <span className="eyebrow">Tutorials</span>
             <h1>Learn Remote Pi by doing.</h1>
             <p className="lede">
-              Four hands-on guides, in order. Start with the app, then add
-              agents, cross-PC routing, and a 24/7 supervisor as you need them.
+              Three hands-on guides, in order. Start with the app, then add
+              agents and cross-PC routing.
               For the <em>why</em> behind it,{" "}
               <Link href="/remote-pi/why">read Why Pi</Link>; for exact flags and
               config, the <Link href="/remote-pi/docs">reference docs</Link>.
@@ -96,13 +79,6 @@ export default function TutorialsIndexPage() {
 
           <div className="card-list">
             {STEPS.map((s) => (
-              <StepCard key={s.href} s={s} />
-            ))}
-          </div>
-
-          <div className="group-label reveal">Extras</div>
-          <div className="card-list">
-            {EXTRAS.map((s) => (
               <StepCard key={s.href} s={s} />
             ))}
           </div>

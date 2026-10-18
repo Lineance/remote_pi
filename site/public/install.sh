@@ -13,9 +13,7 @@
 #                  (~/.local) so `pi` lands on ~/.local/bin without root.
 #   3. remote-pi — installs this plugin into Pi (`pi install npm:remote-pi`).
 #   4. CLI link  — symlinks the `remote-pi` CLI into ~/.local/bin.
-#   5. Supervisor— installs the per-user service (launchd GUI agent on macOS,
-#                  `systemd --user` on Linux) via `remote-pi install`.
-#   6. Stops.    — does NOT pair. Prints the next step (pair your phone).
+#   5. Stops.    — does NOT pair. Prints the next step (pair your phone).
 #
 # OS support: macOS and native Linux. Windows is asked to use WSL and exits
 # cleanly. Re-running is a no-op once everything is in place.
@@ -321,9 +319,7 @@ ensure_plugin() {
 # ── 4. Link the remote-pi CLI into ~/.local/bin ──────────────────────────────
 #
 # `pi install npm:remote-pi` makes the slash command available inside Pi, but it
-# does NOT put the `remote-pi` CLI on $PATH. We symlink it ourselves (the same
-# thing `/remote-pi install` does from inside Pi's TUI, which we can't run from a
-# headless installer).
+# does NOT put the `remote-pi` CLI on $PATH. Link the extension entry here.
 
 link_cli() {
   step "Linking the remote-pi CLI into $LOCAL_BIN"
@@ -340,25 +336,6 @@ link_cli() {
     ok "symlinked $link → $target"
   fi
   record "CLI:        $link"
-}
-
-# ── 5. Supervisor (per-user service) ─────────────────────────────────────────
-#
-# `remote-pi install` writes a launchd GUI agent (macOS) or `systemd --user`
-# unit (Linux) and activates it. It's idempotent (re-running refreshes the
-# unit) and never asks for sudo — it only touches per-user paths.
-
-install_supervisor() {
-  step "Installing the user supervisor service ($OS)"
-  # Run via the CLI we just linked. PATH already includes ~/.local/bin.
-  if remote-pi install; then
-    ok "supervisor installed and activated"
-    record "Supervisor: installed (${OS})"
-  else
-    warn "supervisor install reported an error — see the output above"
-    warn "you can re-run it any time with:  remote-pi install"
-    record "Supervisor: FAILED — re-run 'remote-pi install'"
-  fi
 }
 
 # ── 6. Next steps (no pairing) ───────────────────────────────────────────────
@@ -384,9 +361,7 @@ print_next_steps() {
        (the first run shows a short wizard, then prints a QR code)
     3. Scan the QR with the app to pair.
 
-    Manage the always-on daemon later with ${BOLD}remote-pi${RST} (now on your PATH).
     Docs: ${DIM}https://remote-pi.jacobmoura.work${RST}
-
 EOF
   case ":$PATH:" in
     *":$LOCAL_BIN:"*) : ;;
@@ -403,7 +378,6 @@ main() {
   ensure_pi
   ensure_plugin
   link_cli
-  install_supervisor
   persist_path_in_rc
   print_next_steps
 }

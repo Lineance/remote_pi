@@ -19,7 +19,7 @@
  * 1. A ctx captured before a session replacement/reload is **stale**, and even
  *    *reading* `.modelRegistry` on it throws (`assertActive`). Every read is
  *    wrapped.
- * 2. There may be no live ctx at all (daemon boot, control channel). Rather
+ * 2. There may be no live ctx at all (an RPC control message). Rather
  *    than throw from a WS callback — an uncaught exception that exits pi — we
  *    fall back to the last registry that worked, then to a stub whose methods
  *    never throw and report an empty catalog.

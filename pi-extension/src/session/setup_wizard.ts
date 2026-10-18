@@ -34,8 +34,8 @@ const CANCEL_TOKEN = "__cancel__";
  *      local-only: this Pi joins the UDS mesh but doesn't open WSS.
  *   Final: review + confirm "Save and activate?" yes/no
  *
- * Daemon mode (run agents 24/7 via systemd/launchd) is intentionally NOT in
- * the wizard — it's an explicit, separate opt-in via `/remote-pi install`.
+ * The extension runs only in explicitly launched Pi sessions or when the
+ * companion app connects. It does not provide background agent management.
  *
  * The local UDS mesh is always single per machine ("local" session) — no
  * session question. All Pis on the same machine see each other through
@@ -61,19 +61,19 @@ export async function runSetupWizard(
     defaults.use_relay ? [YES, NO] : [NO, YES],
   );
   if (!useRelayChoice) return null;
-  const auto_start_relay = useRelayChoice === YES;
+  const use_relay = useRelayChoice === YES;
 
   // Review + confirm
   const summary = [
     `  Agent name:    ${agent_name}`,
-    `  Use relay:     ${auto_start_relay ? YES : NO}`,
+    `  Use relay:     ${use_relay ? YES : NO}`,
   ].join("\n");
   ui.notify?.(`Summary:\n${summary}`, "info");
 
   const confirm = await ui.select("Save and activate?", [YES, NO]);
   if (confirm !== YES) return null;
 
-  return { agent_name, auto_start_relay };
+  return { agent_name, use_relay };
 }
 
 /**

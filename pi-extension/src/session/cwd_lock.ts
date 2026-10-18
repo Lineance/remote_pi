@@ -34,7 +34,7 @@ import { ipcAddress, usesNamedPipe } from "./ipc.js";
 
 /** Resolved at call time (not module load) so tests can redirect the lock
  *  dir away from the developer's real `~/.pi/remote/locks` via
- *  `REMOTE_PI_HOME` — same override the daemon registry honors. */
+ *  `REMOTE_PI_HOME`. */
 function locksDir(): string {
   const root = process.env["REMOTE_PI_HOME"] || homedir();
   return join(root, ".pi", "remote", "locks");

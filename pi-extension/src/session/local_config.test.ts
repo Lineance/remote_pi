@@ -30,8 +30,8 @@ describe("loadLocalConfig — file vs REMOTE_PI_DIRECT_CONFIG", () => {
   });
 
   test("reads the on-disk file when env is unset", () => {
-    writeFileConfig(cwd, { agent_name: "fromfile", auto_start_relay: false });
-    expect(loadLocalConfig(cwd)).toEqual({ agent_name: "fromfile", auto_start_relay: false });
+    writeFileConfig(cwd, { agent_name: "fromfile", use_relay: false });
+    expect(loadLocalConfig(cwd)).toEqual({ agent_name: "fromfile", use_relay: false });
   });
 
   test("empty config when neither env nor file present", () => {
@@ -39,9 +39,9 @@ describe("loadLocalConfig — file vs REMOTE_PI_DIRECT_CONFIG", () => {
   });
 
   test("inline env takes precedence over the file", () => {
-    writeFileConfig(cwd, { agent_name: "fromfile", auto_start_relay: false });
-    process.env[ENV] = JSON.stringify({ agent_name: "fromenv", auto_start_relay: true });
-    expect(loadLocalConfig(cwd)).toEqual({ agent_name: "fromenv", auto_start_relay: true });
+    writeFileConfig(cwd, { agent_name: "fromfile", use_relay: false });
+    process.env[ENV] = JSON.stringify({ agent_name: "fromenv", use_relay: true });
+    expect(loadLocalConfig(cwd)).toEqual({ agent_name: "fromenv", use_relay: true });
   });
 
   test("inline env works with no file on disk", () => {
@@ -62,8 +62,8 @@ describe("loadLocalConfig — file vs REMOTE_PI_DIRECT_CONFIG", () => {
   });
 
   test("only known fields are surfaced (unknown keys dropped)", () => {
-    process.env[ENV] = JSON.stringify({ agent_name: "a", auto_start_relay: true, session_name: "x", junk: 1 });
-    expect(loadLocalConfig(cwd)).toEqual({ agent_name: "a", auto_start_relay: true });
+    process.env[ENV] = JSON.stringify({ agent_name: "a", use_relay: true, session_name: "x", junk: 1 });
+    expect(loadLocalConfig(cwd)).toEqual({ agent_name: "a", use_relay: true });
   });
 
   test("non-object env (array/number) falls back to the file", () => {
@@ -143,9 +143,9 @@ describe("saveLocalConfig — unaffected by env (still writes the file)", () => 
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  test("auto_start_relay defaults to true on save", () => {
+  test("use_relay defaults to true on save", () => {
     saveLocalConfig(cwd, { agent_name: "saved" });
     delete process.env[ENV]; // ensure we read the file back, not any env
-    expect(loadLocalConfig(cwd)).toEqual({ agent_name: "saved", auto_start_relay: true });
+    expect(loadLocalConfig(cwd)).toEqual({ agent_name: "saved", use_relay: true });
   });
 });
