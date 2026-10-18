@@ -386,6 +386,9 @@ class Translations$core$menu$en {
 	/// en: 'Open Workspace'
 	String get openWorkspace => 'Open Workspace';
 
+	/// en: 'Go to File…'
+	String get goToFile => 'Go to File…';
+
 	/// en: 'Save'
 	String get save => 'Save';
 
@@ -2051,6 +2054,9 @@ class Translations$cockpit$findBar$en {
 
 	/// en: 'Bad pattern'
 	String get badPattern => 'Bad pattern';
+
+	/// en: '${current} of ${total}'
+	String counter({required Object current, required Object total}) => '${current} of ${total}';
 
 	/// en: 'No results'
 	String get noResults => 'No results';
@@ -3989,6 +3995,7 @@ extension on Translations {
 			'core.menu.file' => 'File',
 			'core.menu.newTerminal' => 'New Terminal',
 			'core.menu.openWorkspace' => 'Open Workspace',
+			'core.menu.goToFile' => 'Go to File…',
 			'core.menu.save' => 'Save',
 			'core.menu.discard' => 'Discard',
 			'core.menu.format' => 'Format',
@@ -4469,9 +4476,9 @@ extension on Translations {
 			'cockpit.sshPrompts.trustHint' => 'Trust it only if this fingerprint matches the server. You can check it on the server with:',
 			'cockpit.sshPrompts.trust' => 'Trust',
 			'cockpit.sshPrompts.sshKeyPassphraseTitle' => 'SSH key passphrase',
-			'cockpit.sshPrompts.unlockMessage' => ({required Object keyPath, required Object connectionName}) => 'Unlock ${keyPath} to connect "${connectionName}".',
 			_ => null,
 		} ?? switch (path) {
+			'cockpit.sshPrompts.unlockMessage' => ({required Object keyPath, required Object connectionName}) => 'Unlock ${keyPath} to connect "${connectionName}".',
 			'cockpit.sshPrompts.keptInMemoryHint' => 'Kept in memory until Cockpit quits. To let agents use this connection, enable "Save passphrase" in the connection.',
 			'cockpit.sshPrompts.unlock' => 'Unlock',
 			'cockpit.projectsRail.workspaces' => 'Workspaces',
@@ -4508,6 +4515,7 @@ extension on Translations {
 			'cockpit.findBar.next' => 'Next (⏎)',
 			'cockpit.findBar.close' => 'Close (Esc)',
 			'cockpit.findBar.badPattern' => 'Bad pattern',
+			'cockpit.findBar.counter' => ({required Object current, required Object total}) => '${current} of ${total}',
 			'cockpit.findBar.noResults' => 'No results',
 			'cockpit.contentSearch.sectionSearch' => 'SEARCH',
 			'cockpit.contentSearch.searchInFiles' => 'Search in files',
@@ -4982,10 +4990,10 @@ extension on Translations {
 			'theme.error.reservedId' => 'This theme uses the id of a built-in theme. Change "id" in the file and import again.',
 			'theme.error.notAnObject' => ({required Object field}) => 'Expected an object at "${field}".',
 			'theme.error.missingField' => ({required Object field}) => 'Missing required field "${field}".',
-			'theme.error.badColor' => ({required Object value, required Object field}) => '"${value}" at "${field}" is not a color. Use #RGB, #RRGGBB or #RRGGBBAA.',
-			'theme.error.unknownBase' => ({required Object value}) => 'Unknown base theme "${value}" in "extends".',
 			_ => null,
 		} ?? switch (path) {
+			'theme.error.badColor' => ({required Object value, required Object field}) => '"${value}" at "${field}" is not a color. Use #RGB, #RRGGBB or #RRGGBBAA.',
+			'theme.error.unknownBase' => ({required Object value}) => 'Unknown base theme "${value}" in "extends".',
 			'theme.error.noVariants' => 'The theme declares no variant. Add "dark", "light" or both under "variants".',
 			_ => null,
 		};

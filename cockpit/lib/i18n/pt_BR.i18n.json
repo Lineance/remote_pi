@@ -44,6 +44,7 @@
       "file": "Arquivo",
       "newTerminal": "Novo Terminal",
       "openWorkspace": "Abrir Workspace",
+      "goToFile": "Ir para Arquivo…",
       "save": "Salvar",
       "discard": "Descartar",
       "format": "Formatar",
@@ -640,6 +641,7 @@
       "next": "Próximo (⏎)",
       "close": "Fechar (Esc)",
       "badPattern": "Padrão inválido",
+      "counter": "${current} de ${total}",
       "noResults": "Nenhum resultado"
     },
     "contentSearch": {
