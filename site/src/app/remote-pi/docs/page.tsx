@@ -44,7 +44,10 @@ const DOCS_TOC: TocItem[] = [
   {
     id: "commands",
     label: "Command reference",
-    sub: [{ id: "commands-local", label: "Local session" }],
+    sub: [
+      { id: "commands-local", label: "Local session" },
+      { id: "commands-mobile", label: "From the mobile chat" },
+    ],
   },
   { id: "config", label: "Configuration files" },
   {
@@ -516,6 +519,33 @@ export default function DocsPage() {
               ],
             ]}
           />
+        </DocsSubsection>
+
+        <DocsSubsection id="commands-mobile" title="From the mobile chat">
+          <p>
+            Type one of these commands into the existing chat input. The app
+            sends its usual <InlineCode>user_message</InlineCode>; the Pi
+            extension intercepts allowlisted forms before they reach the model,
+            so this does not require an iOS app update.
+          </p>
+          <DocsTable
+            headers={["Chat input", "Effect"]}
+            rows={[
+              [<InlineCode key="c">/compact [instructions]</InlineCode>, "Request context compaction"],
+              [<InlineCode key="c">/model &lt;provider&gt;/&lt;model-id&gt;</InlineCode>, "Select a configured model"],
+              [<InlineCode key="c">/thinking &lt;level&gt;</InlineCode>, "Set off, minimal, low, medium, high, or xhigh"],
+              [<InlineCode key="c">/remote-pi status|config|peers|devices</InlineCode>, "Read local session, relay, mesh, and paired-device status"],
+              [<InlineCode key="c">/remote-pi relay status|start</InlineCode>, "Read or start the relay connection"],
+              [<InlineCode key="c">/remote-pi set-relay &lt;url&gt;</InlineCode>, "Change the configured relay URL"],
+              [<InlineCode key="c">/remote-pi commands</InlineCode>, "Show the remote allowlist and discovered command names"],
+            ]}
+          />
+          <p className="text-sm">
+            The SDK catalog can list extension, prompt-template, and skill
+            commands, but it does not expose their handlers or argument schemas.
+            Built-in TUI commands that are not listed here are not dispatched
+            remotely. Unrecognized slash text follows the normal chat path.
+          </p>
         </DocsSubsection>
 
         <p>The footer in the Pi TUI reflects state live:</p>

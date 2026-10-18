@@ -84,6 +84,7 @@ import {
   handleThinkingSet,
   handleListModels,
   type ActionCtx,
+  type ActionReplySender,
 } from "./actions/handlers.js";
 import { ensureModelRegistry } from "./actions/registry.js";
 import {
@@ -101,6 +102,7 @@ import {
   saveLocalConfig,
 } from "./session/local_config.js";
 import { runSetupWizard, type WizardUI } from "./session/setup_wizard.js";
+import { isRemoteThinkingLevel, parseRemoteSlashCommand, remotePiCommandHelp, type RemoteSlashCommand } from "./session/remote_commands.js";
 import { updateFooter, type FooterState } from "./ui/footer.js";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -231,6 +233,8 @@ let _sessionName: string | null = null;
 let _sessionPeerCount = 0;
 // Invalidates an in-flight MeshNode.connect() before it can publish globally.
 let _meshJoinGeneration = 0;
+let _remoteSlashInFlight = false;
+const _handledRemoteSlashIds = new Set<string>();
 // Set true by `session_shutdown`. Connecting is async, so shutdown can land
 // while `_cmdRoot` has not published either candidate yet. `_disposed` blocks
 // the outgoing continuation until a same-module `session_start` rearms it;
@@ -3748,6 +3752,23 @@ export function _routeClientMessageFrom(
       const requestedSteer = msg.streaming_behavior === "steer";
       const inferredBusySteer = !requestedSteer && _myRoomMeta?.working === true;
       const shouldSteer = requestedSteer || inferredBusySteer;
+      if (!msg.images?.length) {
+        const remoteCommand = parseRemoteSlashCommand(msg.text);
+        if (remoteCommand) {
+          if (!_claimRemoteSlashId(msg.id)) break;
+          _echoUserMessage(msg, shouldSteer);
+          if (_agentRunActive || _myRoomMeta?.working) {
+            _sendRemoteSlashReply(sender, msg.id, "Wait for the current Pi turn to finish before running a slash command.", true);
+          } else if (_remoteSlashInFlight) {
+            _sendRemoteSlashReply(sender, msg.id, "Another remote slash command is still running.", true);
+          } else {
+            _remoteSlashInFlight = true;
+            void _dispatchRemoteSlashCommand(sender, msg, remoteCommand)
+              .finally(() => { _remoteSlashInFlight = false; });
+          }
+          break;
+        }
+      }
       // A reconnecting app can correctly send `steer` while our mirror has no
       // turn id (for example, the turn started while no owner was attached).
       // Also be defensive for clients that send a plain user_message while the
@@ -3879,6 +3900,190 @@ export function _routeClientMessageFrom(
         msg,
       );
       break;
+  }
+}
+
+const REMOTE_SLASH_DEDUPE_LIMIT = 256;
+
+function _claimRemoteSlashId(id: string): boolean {
+  if (_handledRemoteSlashIds.has(id)) return false;
+  _handledRemoteSlashIds.add(id);
+  if (_handledRemoteSlashIds.size > REMOTE_SLASH_DEDUPE_LIMIT) {
+    const oldest = _handledRemoteSlashIds.values().next().value as string | undefined;
+    if (oldest !== undefined) _handledRemoteSlashIds.delete(oldest);
+  }
+  return true;
+}
+
+function _sendRemoteSlashReply(
+  sender: PlainPeerChannel,
+  id: string,
+  text: string,
+  isError = false,
+): void {
+  const message: ServerMessage = isError
+    ? { type: "error", in_reply_to: id, code: "invalid_message", message: text }
+    : { type: "agent_message", in_reply_to: id, text };
+  if (_activePeers.size > 0) _broadcastToActive(message);
+  else sender.send(message);
+}
+
+function _remoteSlashContext(notifications: string[]): ExtensionContext {
+  const base = (_lastEventCtx ?? _lastCtx ?? _noopCtx) as unknown as ExtensionContext;
+  let baseUi: ExtensionContext["ui"];
+  try {
+    baseUi = base.ui;
+  } catch {
+    baseUi = _headlessUi() as unknown as ExtensionContext["ui"];
+  }
+  const ui = new Proxy(baseUi, {
+    get(target, key) {
+      if (key === "notify") {
+        return (message: string) => notifications.push(message);
+      }
+      const value = Reflect.get(target, key, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return new Proxy(base, {
+    get(target, key) {
+      if (key === "ui") return ui;
+      if (key === "cwd") {
+        try { return Reflect.get(target, key, target) ?? process.cwd(); }
+        catch { return process.cwd(); }
+      }
+      const value = Reflect.get(target, key, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+function _remoteSlashCatalog(): string {
+  const lines = remotePiCommandHelp.map((command) => `  ${command}`);
+  let discovered: string[] = [];
+  try {
+    discovered = (_pi?.getCommands() ?? []).map((command) =>
+      `  /${command.name}${command.description ? ` — ${command.description}` : ""}`,
+    );
+  } catch { /* keep the supported remote command list */ }
+  const catalog = discovered.length
+    ? `\n\nDiscovered Pi extension/prompt/skill commands (catalog only):\n${discovered.join("\n")}`
+    : "";
+  return `Remote-enabled slash commands:\n${lines.join("\n")}${catalog}\n\n` +
+    "Only the commands listed as remote-enabled are dispatched by the server. " +
+    "The Pi catalog does not expose built-in command handlers or argument schemas.";
+}
+
+async function _dispatchRemotePiSlash(args: string): Promise<string> {
+  const trimmed = args.trim();
+  if (!trimmed || trimmed === "help" || trimmed === "commands") return _remoteSlashCatalog();
+  const splitAt = trimmed.search(/\s/);
+  const subcommand = (splitAt < 0 ? trimmed : trimmed.slice(0, splitAt)).toLowerCase();
+  const rest = splitAt < 0 ? "" : trimmed.slice(splitAt).trim();
+  const notifications: string[] = [];
+  const commandCtx = _remoteSlashContext(notifications);
+
+  switch (subcommand) {
+    case "status":
+      _cmdStatus(commandCtx);
+      break;
+    case "config":
+      _cmdConfig(commandCtx);
+      break;
+    case "peers":
+      await _cmdPeers(commandCtx);
+      break;
+    case "devices":
+      await _cmdList(commandCtx);
+      break;
+    case "set-relay":
+      if (!rest) throw new Error("Usage: /remote-pi set-relay <http(s) URL>");
+      _cmdSetRelay(rest, commandCtx);
+      break;
+    case "relay": {
+      const relaySplitAt = rest.search(/\s/);
+      const relayAction = (relaySplitAt < 0 ? rest : rest.slice(0, relaySplitAt)).toLowerCase();
+      const relayArg = relaySplitAt < 0 ? "" : rest.slice(relaySplitAt).trim();
+      if (relayAction === "url") {
+        if (!relayArg) throw new Error("Usage: /remote-pi relay url <http(s) URL>");
+        _cmdSetRelay(relayArg, commandCtx);
+      } else if (relayAction === "status" || relayAction === "start") {
+        await _cmdRelay(relayAction, commandCtx);
+      } else {
+        throw new Error("Remote relay commands are limited to status, start, and url.");
+      }
+      break;
+    }
+    default:
+      throw new Error(`Remote command /remote-pi ${subcommand} is not enabled. Use /remote-pi commands to list supported actions.`);
+  }
+  return notifications.join("\n") || "Command completed.";
+}
+
+async function _dispatchRemoteSlashCommand(
+  sender: PlainPeerChannel,
+  msg: ClientUserMessage,
+  command: RemoteSlashCommand,
+): Promise<void> {
+  try {
+    let result = "";
+    switch (command.kind) {
+      case "compact": {
+        const ctx = (_lastEventCtx ?? _lastCtx) as ActionCtx | null;
+        if (!ctx?.compact) throw new Error("Compaction is unavailable in this session.");
+        if ((command.instructions?.length ?? 0) > 1000) {
+          throw new Error("Compaction instructions are limited to 1000 characters.");
+        }
+        ctx.compact({
+          customInstructions: command.instructions ||
+            "Always write the compaction summary in English, even if the conversation is in another language.",
+        });
+        result = "Context compaction requested.";
+        break;
+      }
+      case "model": {
+        const match = /^([^/\s]+)\/([^\s]+)$/.exec(command.argument.trim());
+        if (!match) throw new Error("Usage: /model <provider>/<model-id>");
+        if (!_pi) throw new Error("Pi session is not ready.");
+        const ctx = (_lastEventCtx ?? _lastCtx) as ActionCtx | null;
+        const replies: ServerMessage[] = [];
+        await handleModelSet(
+          _pi,
+          ctx,
+          ensureModelRegistry(ctx),
+          { send: (reply) => replies.push(reply) } satisfies ActionReplySender,
+          { type: "model_set", id: msg.id, provider: match[1]!, model_id: match[2]! },
+          _persistModelDefault,
+        );
+        const failure = replies.find((reply) => reply.type === "action_error");
+        if (failure?.type === "action_error") throw new Error(failure.error);
+        result = `Model set to ${match[1]}/${match[2]}.`;
+        break;
+      }
+      case "thinking": {
+        const level = command.argument.trim();
+        if (!isRemoteThinkingLevel(level)) {
+          throw new Error("Usage: /thinking <off|minimal|low|medium|high|xhigh>");
+        }
+        if (!_pi) throw new Error("Pi session is not ready.");
+        const replies: ServerMessage[] = [];
+        handleThinkingSet(
+          _pi,
+          { send: (reply) => replies.push(reply) } satisfies ActionReplySender,
+          { type: "thinking_set", id: msg.id, level },
+        );
+        const failure = replies.find((reply) => reply.type === "action_error");
+        if (failure?.type === "action_error") throw new Error(failure.error);
+        result = `Thinking level set to ${level}.`;
+        break;
+      }
+      case "remote-pi":
+        result = await _dispatchRemotePiSlash(command.arguments);
+        break;
+    }
+    _sendRemoteSlashReply(sender, msg.id, result);
+  } catch (error) {
+    _sendRemoteSlashReply(sender, msg.id, error instanceof Error ? error.message : String(error), true);
   }
 }
 

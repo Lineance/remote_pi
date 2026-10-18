@@ -368,6 +368,39 @@ describe("extension default export", () => {
   });
 });
 
+// ── Remote slash commands sent through the existing user_message wire ────────
+
+describe("mobile remote slash commands", () => {
+  test("dispatches allowlisted commands server-side without prompting the model", async () => {
+    const send = vi.fn();
+    const sendUserMessage = vi.fn();
+    _setPiForTest({ sendUserMessage, sendMessage: vi.fn() });
+    try {
+      const command = { type: "user_message", id: "mobile-status-1", text: "/remote-pi status" } as const;
+      _routeClientMessageFrom(
+        { send } as unknown as Parameters<typeof _routeClientMessageFrom>[0],
+        command,
+        makeMockCtx(),
+      );
+      _routeClientMessageFrom(
+        { send } as unknown as Parameters<typeof _routeClientMessageFrom>[0],
+        command,
+        makeMockCtx(),
+      );
+      await vi.waitFor(() => expect(send).toHaveBeenCalled());
+      expect(sendUserMessage).not.toHaveBeenCalled();
+      expect(send.mock.calls.filter(([message]) => message.type === "agent_message")).toHaveLength(1);
+      expect(send).toHaveBeenCalledWith(expect.objectContaining({
+        type: "agent_message",
+        in_reply_to: "mobile-status-1",
+        text: expect.stringContaining("Local mesh"),
+      }));
+    } finally {
+      _setPiForTest(null);
+    }
+  });
+});
+
 // ── State machine + pair_request flow ─────────────────────────────────────────
 
 describe("state machine + pair_request flow", () => {

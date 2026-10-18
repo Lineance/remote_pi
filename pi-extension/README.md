@@ -413,6 +413,22 @@ real name to the peer.
 | `/remote-pi relay url <url>` | Same as `set-relay` |
 | `/remote-pi config` | Show the effective relay URL and its source (env / config / default) |
 
+### Commands from mobile chat
+
+Type an allowlisted slash command into the existing chat input. Remote Pi intercepts it before sending text to the model; no iOS app update is required:
+
+| Chat input | Effect |
+|---|---|
+| `/compact [instructions]` | Compact the current Pi context |
+| `/model <provider>/<model-id>` | Select a model already configured in Pi |
+| `/thinking <level>` | Set `off`, `minimal`, `low`, `medium`, `high`, or `xhigh` |
+| `/remote-pi commands` | Show remote-enabled commands and discovered command names |
+| `/remote-pi status`, `/remote-pi config`, `/remote-pi peers`, `/remote-pi devices` | Read current session, relay, mesh, or pairing status |
+| `/remote-pi relay status`, `/remote-pi relay start`, `/remote-pi relay url <url>` | Inspect or update relay connection/configuration |
+| `/remote-pi set-relay <url>` | Set the relay URL |
+
+The discovered catalog includes extension, prompt-template, and skill names, but does not make them remotely executable. Pi built-in TUI commands are not part of the remote allowlist; unrecognized slash text follows the normal chat path and is not executed as a command.
+
 ### Footer + title
 
 - `📡 local (N)` — current agent session and peer count (local mesh)
