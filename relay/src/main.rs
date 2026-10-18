@@ -62,7 +62,11 @@ async fn main() -> anyhow::Result<()> {
     };
     let app = relay::build_router(state);
 
-    let addr = format!("0.0.0.0:{port}");
+    // Optional bind host. Defaults to the wildcard address so bare-metal and
+    // Docker behavior is unchanged; set REMOTEPI_RELAY_HOST to restrict the
+    // listener to one local address (e.g. a Tailscale IP). IPv4 only.
+    let host = std::env::var("REMOTEPI_RELAY_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let addr = format!("{host}:{port}");
     let listener = TcpListener::bind(&addr)
         .await
         .with_context(|| format!("failed to bind {addr}"))?;
