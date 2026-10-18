@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { IconArrow, IconStar } from "@/components/landing/icons";
+import { IconArrow } from "@/components/landing/icons";
 import { RevealController } from "@/components/landing/reveal-controller";
 
 export const metadata: Metadata = {
@@ -11,7 +11,6 @@ export const metadata: Metadata = {
 
 type Step = {
   n?: string;
-  star?: boolean;
   tag: string;
   title: string;
   href: string;
@@ -21,14 +20,14 @@ type Step = {
 const STEPS: Step[] = [
   {
     n: "1",
-    tag: "01 / 04",
+    tag: "01 / 03",
     title: "Getting started",
     href: "/remote-pi/tutorials/getting-started",
     desc: "Install Remote Pi, pair your phone, and drive your first agent from the app.",
   },
   {
     n: "2",
-    tag: "02 / 04",
+    tag: "02 / 03",
     title: "Local mesh",
     href: "/remote-pi/tutorials/mesh-local",
     desc: "Let two agents on the same machine discover each other and trade messages.",
@@ -46,7 +45,7 @@ function StepCard({ s }: { s: Step }) {
   return (
     <Link className="step-card reveal" href={s.href}>
       <div className="sc-top">
-        <span className="sc-num">{s.star ? <IconStar /> : s.n}</span>
+        <span className="sc-num">{s.n}</span>
         <span className="sc-tag">{s.tag}</span>
       </div>
       <h3>{s.title}</h3>

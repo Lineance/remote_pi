@@ -49,6 +49,7 @@
   },
   "files": [
     "dist",
+    "!dist/mcp",
     "skills",
     "README.md",
     "LICENSE"
